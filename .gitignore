@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local env
+.env
+*.env
+
+# Model weights & large blobs
+external/TripoSR/*.ckpt
+external/TripoSR/*.pth
+external/TripoSR/*.bin
+external/TripoSR/checkpoints/
+external/TripoSR/cache/
+external/TripoSR/models/
+*.pt
+*.onnx
+
+# Cloudflared
+cloudflared/*.json
+cloudflared/cert.pem

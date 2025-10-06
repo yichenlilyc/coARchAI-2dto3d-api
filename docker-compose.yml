@@ -1,0 +1,61 @@
+version: "3.9"
+
+services:
+  app-gpu:
+    build:
+      context: .
+      dockerfile: scripts/docker/Dockerfile.gpu
+      args:
+        CUDA_ARCH_LIST: "120"        # RTX 5090 (sm_120)
+        TORCH_CUDA_ARCH_DOT: "12.0"
+    # For Docker Desktop (Win/mac), this is enough:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+    # If your Docker supports it, you can instead use:
+    # gpus: all
+    environment:
+      TRIPOSR_MODEL_DIR: /app/external/TripoSR
+      TRIPOSR_CONFIG: config.yaml
+      TRIPOSR_WEIGHTS: model.ckpt
+      USE_NVTX: "0"
+      CAFFE2_USE_NVTX: "0"
+    volumes:
+      - .:/app:rw
+    ports:
+      - "8000:8000"
+    command: >
+      uvicorn scripts.server:app
+      --host 0.0.0.0 --port 8000 --workers 1
+
+  app-cpu:
+    build:
+      context: .
+      dockerfile: scripts/docker/Dockerfile.cpu
+    environment:
+      TRIPOSR_MODEL_DIR: /app/external/TripoSR
+      TRIPOSR_CONFIG: config.yaml
+      TRIPOSR_WEIGHTS: model.ckpt
+    volumes:
+      - .:/app:rw
+    ports:
+      - "8001:8000"
+    command: >
+      uvicorn scripts.server:app
+      --host 0.0.0.0 --port 8000 --workers 1
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    depends_on:
+      - app-gpu
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - ${CF_TUNNEL_TOKEN}

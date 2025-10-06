@@ -1,0 +1,6 @@
+ingress:
+  - hostname: gpu-2dto3d.yichenliclaire.com
+    service: http://app-gpu:8000        # container-to-container
+  - hostname: cpu-2dto3d.yichenliclaire.com
+    service: http://app-cpu:8000        # container-to-container
+  - service: http_status:404

@@ -1,0 +1,59 @@
+# ---- GPU build (CUDA 12.8 + PyTorch 2.8.0 cu128) ----
+FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+# You can override this at build time: --build-arg CUDA_ARCH_LIST="70;75;80;86;89;90"
+# (Default covers Turing 20xx, Ampere 30xx, Ada 40xx, Hopper 90)
+# at the top (or before you set ENV)
+ARG CUDA_ARCH_LIST="90;89;86;80;75"
+ARG TORCH_CUDA_ARCH_DOT="9.0;8.9;8.6;8.0;7.5"
+
+# Basic OS deps (compiler, cmake, ninja for torchmcubes; ffmpeg/opengl bits for image/mesh ops)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv python3.11-dev python3-pip \
+    build-essential git cmake ninja-build pkg-config \
+    ffmpeg libgl1 libglib2.0-0 curl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+# Make `python` point to 3.11
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+ && python -m pip install -U pip
+
+WORKDIR /app
+
+# Copy only the dependency list first to leverage Docker layer caching
+COPY requirements.txt ./requirements.txt
+
+# 1) Install the correct GPU PyTorch wheel first
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 \
+    torch==2.8.0+cu128
+
+# 2) Tell PyTorch/CMake which GPU architectures to compile native extensions for
+ENV CMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH_LIST}"
+ENV TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_DOT}"
+# Optional: speed up some source builds
+ENV MAX_JOBS=8
+
+# Build tools needed by torchmcubes
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+ && pip install --no-cache-dir "scikit-build-core>=0.11.6" cmake ninja "pybind11[global]>=2.11"
+
+
+# 3) Install the rest (includes torchmcubes from source)
+RUN pip install --no-cache-dir --no-build-isolation -r requirements.txt
+
+# Copy the whole repo (after deps to keep cache effective)
+COPY . /app
+
+# TripoSR model location (adjust if you use a different path)
+# Expected files: /app/external/TripoSR/models/triposr/config.yaml and model.ckpt
+ENV TRIPOSR_MODEL_DIR=/app/external/TripoSR/models/triposr
+ENV TRIPOSR_CONFIG=config.yaml
+ENV TRIPOSR_WEIGHTS=model.ckpt
+
+# Prefer CUDA
+ENV USE_CUDA=1
+
+EXPOSE 8000
+# Use explicit module path to avoid cwd confusion
+CMD ["uvicorn", "scripts.server:app", "--host", "0.0.0.0", "--port", "8000"]

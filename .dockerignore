@@ -1,0 +1,10 @@
+.venv*
+__pycache__/
+*.pyc
+.git/
+*.pt
+*.pth
+*.ckpt
+*.log
+*.tmp
+.DS_Store
