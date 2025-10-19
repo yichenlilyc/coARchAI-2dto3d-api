@@ -42,7 +42,7 @@ DTYPE = torch.float16 if CUDA_OK else torch.float32
 
 # --- Tripo3D (cloud) config ---
 TRIPO3D_API_KEY = os.getenv("TRIPO3D_API_KEY", "")  # REQUIRED for /image-to-3d/tripo3d
-USE_TRIPO_SDK = bool(int(os.getenv("USE_TRIPO_SDK", "1")))  # default on
+USE_TRIPO_SDK = bool(int(os.getenv("USE_TRIPO_SDK", "1"))) 
 TRIPO3D_BASE = os.getenv("TRIPO3D_BASE", "https://api.tripo3d.ai/v2/openapi")
 TRIPO3D_MODEL_VERSION = os.getenv("TRIPO3D_MODEL_VERSION", "v2.0-20240919")
 TRIPO3D_POLL_SECONDS = float(os.getenv("TRIPO3D_POLL_SECONDS", "2.0"))
@@ -91,8 +91,7 @@ async def _sdk_upload_bytes(data: bytes, filename: str = "image.png"):
             tmp_path = tf.name
         try:
             with _TripoClient(api_key=TRIPO3D_API_KEY) as c:
-                # IMPORTANT: keep the object; don't coerce to str
-                tok_obj = c.upload_file(tmp_path)  # returns a FileToken model
+                tok_obj = c.upload_file(tmp_path)
                 return tok_obj
         finally:
             try:
@@ -131,19 +130,15 @@ async def _sdk_wait_and_download_glb(task_id: str) -> bytes:
                 blob = c.try_download_model(task_id)
                 if blob is None:
                     time.sleep(poll_sec)
-                    continue
 
-                # 1) If SDK returns raw bytes, just return them
                 if isinstance(blob, (bytes, bytearray)):
                     return bytes(blob)
-
-                # 2) If SDK returns an object with .save(path), write to a temp file path
                 if hasattr(blob, "save"):
                     tmp_path = None
                     try:
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".glb") as tf:
                             tmp_path = tf.name
-                        blob.save(tmp_path)  # <-- save expects a PATH (string)
+                        blob.save(tmp_path)
                         with open(tmp_path, "rb") as f:
                             return f.read()
                     finally:
@@ -153,14 +148,12 @@ async def _sdk_wait_and_download_glb(task_id: str) -> bytes:
                             except Exception:
                                 pass
 
-                # 3) If SDK returns an object with a URL, fetch it
                 url = getattr(blob, "url", None)
                 if url:
                     r = requests.get(url, timeout=300)
                     r.raise_for_status()
                     return r.content
 
-                # Unknown blob type
                 raise RuntimeError(f"Unsupported download blob type: {type(blob)}")
 
     return await run_in_threadpool(_run)
@@ -421,10 +414,8 @@ async def _tripo3d_upload_from_bytes(data: bytes, filename: str = "image.png", m
     if resp.get("code") != 0:
         raise HTTPException(502, f"Tripo3D upload error: {resp}")
 
-    # <-- this line was missing in your version
     d = resp.get("data", {}) or {}
 
-    # Prefer file_token per latest API; older variants used token/image_token
     token = d.get("file_token") or d.get("image_token") or d.get("token")
     url = d.get("url") or d.get("image_url")
 
@@ -435,7 +426,7 @@ async def _tripo3d_upload_from_bytes(data: bytes, filename: str = "image.png", m
     if token:
         out["file_token"] = token
     if url:
-        out["url"] = url  # 'url' (not 'image_url') matches /task schema
+        out["url"] = url
     return out
 
 
@@ -445,7 +436,6 @@ async def _tripo3d_resolve_image_payload(payload: dict) -> dict:
         return await _tripo3d_upload_from_bytes(raw)
 
     if payload.get("url"):
-        # We re-upload so Tripo can fetch it reliably; if you prefer, you can just return {"url": payload["url"]} if it's public.
         raw = await _download_bytes(payload["url"])
         mime, fn = "image/png", "image.png"
         low = payload["url"].lower()
@@ -466,18 +456,15 @@ async def tripo3d_create_task(image_spec: dict, params: Optional[dict] = None) -
     if not TRIPO3D_API_KEY:
         raise HTTPException(500, "TRIPO3D_API_KEY not set")
 
-    # Extract the source once
     file_token = image_spec.get("file_token")
     url = image_spec.get("url")
     if not (file_token or url):
         raise HTTPException(400, f"tripo3d_create_task: need file_token or url in {image_spec}")
 
-    # Build optional knobs
     mv = os.getenv("TRIPO3D_MODEL_VERSION", "").strip()  # allow empty (=omit)
     user_params = params.copy() if isinstance(params, dict) else {}
 
     def make_payloads():
-        # two “sources”
         sources = []
         if file_token:
             sources += [
@@ -490,7 +477,6 @@ async def tripo3d_create_task(image_spec: dict, params: Optional[dict] = None) -
                 {"input": {"url": url}},
             ]
 
-        # try with model_version first (if provided), then without
         base_with_mv = ({"type": "image_to_model", "model_version": mv} if mv else None)
         base_without_mv = {"type": "image_to_model"}
 
@@ -525,16 +511,11 @@ async def tripo3d_create_task(image_spec: dict, params: Optional[dict] = None) -
 
         status, data = await run_in_threadpool(_post)
 
-        # Optional: uncomment to see each attempt in container logs
-        # print("DEBUG Tripo3D create", tag, "payload ->", payload, flush=True)
-        # print("DEBUG Tripo3D create", tag, "resp    ->", status, data, flush=True)
-
         if status == 200 and isinstance(data, dict) and data.get("code") == 0:
             return data["data"]["task_id"]
 
         tried.append({"tag": tag, "status": status, "resp": data})
 
-    # All attempts failed — surface everything so we can see the exact rule your tenant enforces
     raise HTTPException(502, f"Tripo3D create task failed with all payload variants: {tried}")
 
 
@@ -600,7 +581,6 @@ async def upload_image(file: UploadFile = File(...)):
     Returns a relative URL you can hand back into /image-to-3d/* endpoints.
     """
     import uuid, shutil
-    # Preserve extension for type detection
     ext = ""
     if "." in file.filename:
         ext = "." + file.filename.split(".")[-1].lower()
@@ -608,7 +588,6 @@ async def upload_image(file: UploadFile = File(...)):
     out_path = os.path.join(UPLOAD_DIR, fname)
     with open(out_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    # Return a path the server can serve and your Unity client can hit
     return {"url": f"/upload/{fname}"}
 
 # ========== SHAP-E ENDPOINT ==========
@@ -777,9 +756,7 @@ def image_to_3d_triposr(payload: dict = Body(...), seed: Optional[int] = None):
 @app.post("/image-to-3d/tripo3d")
 async def image_to_3d_tripo3d(payload: dict = Body(...)):
     try:
-        # ---------- SDK path (recommended) ----------
         if USE_TRIPO_SDK:
-            # 1) Load bytes from url/b64 (reuse your existing loader)
             if payload.get("b64"):
                 raw = base64.b64decode(payload["b64"])
                 filename = "image.png"
@@ -790,26 +767,15 @@ async def image_to_3d_tripo3d(payload: dict = Body(...)):
             else:
                 raise HTTPException(400, "Missing 'url' or 'b64'")
 
-            # 2) Upload via SDK -> file_token
             file_token = await _sdk_upload_bytes(raw, filename=filename)
 
-            # 3) Optional params pass-through
             params = payload.get("params") if isinstance(payload, dict) else None
 
-            # 4) Create task & poll
             task_id = await _sdk_create_task(file_token, params)
             glb_bytes = await _sdk_wait_and_download_glb(task_id)
 
             headers = {"Content-Disposition": 'attachment; filename="tripo3d.glb"'}
             return Response(content=glb_bytes, media_type="model/gltf-binary", headers=headers)
-
-        # ---------- Raw HTTP path (your existing fallback) ----------
-        # (keep your current code here unchanged)
-        # image_spec = await _tripo3d_resolve_image_payload(payload)
-        # params = payload.get("params") if isinstance(payload, dict) else None
-        # prov_task_id = await tripo3d_create_task(image_spec, params)
-        # out = await tripo3d_poll_until_done(prov_task_id)
-        # ... download GLB and return ...
 
     except HTTPException:
         raise
