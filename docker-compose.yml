@@ -23,6 +23,12 @@ services:
       TRIPOSR_WEIGHTS: model.ckpt
       USE_NVTX: "0"
       CAFFE2_USE_NVTX: "0"
+      TRIPO3D_API_KEY: "${TRIPO3D_API_KEY}"
+      USE_TRIPO_SDK: "1"
+      TRIPO3D_BASE: "https://api.tripo3d.ai/v2/openapi"
+      TRIPO3D_MODEL_VERSION: "v2.0-20240919"
+      TRIPO3D_POLL_SECONDS: "2.0"
+      TRIPO3D_TIMEOUT_SECONDS: "1800"
     volumes:
       - .:/app:rw
     ports:
@@ -39,6 +45,12 @@ services:
       TRIPOSR_MODEL_DIR: /app/external/TripoSR
       TRIPOSR_CONFIG: config.yaml
       TRIPOSR_WEIGHTS: model.ckpt
+      TRIPO3D_API_KEY: "${TRIPO3D_API_KEY}"
+      USE_TRIPO_SDK: "1"
+      TRIPO3D_BASE: "https://api.tripo3d.ai/v2/openapi"
+      TRIPO3D_MODEL_VERSION: "v2.0-20240919"
+      TRIPO3D_POLL_SECONDS: "2.0"
+      TRIPO3D_TIMEOUT_SECONDS: "1800"
     volumes:
       - .:/app:rw
     ports:

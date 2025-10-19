@@ -21,6 +21,8 @@ einops==0.7.0
 omegaconf==2.3.0
 xatlas==0.0.9
 moderngl==5.10.0
+tripo==0.2.1
+
 
 # ---- Background removal ----
 onnxruntime==1.17.3

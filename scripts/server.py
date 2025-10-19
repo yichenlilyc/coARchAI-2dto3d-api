@@ -19,17 +19,36 @@ from PIL import Image
 import requests
 import trimesh
 
-from fastapi import FastAPI, Body
+import asyncio
+import time
+
+from fastapi import FastAPI, Body, HTTPException
 from fastapi.responses import Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
+from fastapi import UploadFile, File
+from fastapi.staticfiles import StaticFiles
+
 
 # --- CONFIG / DEVICE ---
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/app/upload")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 USE_CUDA = bool(int(os.getenv("USE_CUDA", "0")))  # default 0 (CPU); set 1 to prefer CUDA if available
 CUDA_OK = torch.cuda.is_available() and USE_CUDA
 DEVICE = "cuda" if CUDA_OK else "cpu"
 DTYPE = torch.float16 if CUDA_OK else torch.float32
 
-app = FastAPI(title="2D→3D Service (Shap-E + TripoSR)")
+
+
+# --- Tripo3D (cloud) config ---
+TRIPO3D_API_KEY = os.getenv("TRIPO3D_API_KEY", "")  # REQUIRED for /image-to-3d/tripo3d
+USE_TRIPO_SDK = bool(int(os.getenv("USE_TRIPO_SDK", "1")))  # default on
+TRIPO3D_BASE = os.getenv("TRIPO3D_BASE", "https://api.tripo3d.ai/v2/openapi")
+TRIPO3D_MODEL_VERSION = os.getenv("TRIPO3D_MODEL_VERSION", "v2.0-20240919")
+TRIPO3D_POLL_SECONDS = float(os.getenv("TRIPO3D_POLL_SECONDS", "2.0"))
+TRIPO3D_TIMEOUT_SECONDS = float(os.getenv("TRIPO3D_TIMEOUT_SECONDS", "1800"))  # 30min
+
+app = FastAPI(title="2D→3D Service (Shap-E + Tripo)")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,6 +56,116 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.mount("/upload", StaticFiles(directory=UPLOAD_DIR), name="upload")
+
+# ---- Tripo SDK path (robust against schema differences) ----
+try:
+    from tripo import Client as _TripoClient
+    HAVE_TRIPO_SDK = True
+except Exception:
+    HAVE_TRIPO_SDK = False
+    _TripoClient = None
+
+
+def _sdk_require():
+    if not USE_TRIPO_SDK:
+        raise RuntimeError("USE_TRIPO_SDK is off")
+    if not HAVE_TRIPO_SDK:
+        raise RuntimeError("Tripo SDK not installed; add 'tripo' to requirements.txt")
+    if not TRIPO3D_API_KEY:
+        raise RuntimeError("TRIPO3D_API_KEY not set")
+
+
+async def _sdk_upload_bytes(data: bytes, filename: str = "image.png"):
+    """
+    Save bytes to a temp file, upload via SDK, and return the FileToken object.
+    """
+    _sdk_require()
+
+    def _run():
+        import tempfile, os
+        suffix = os.path.splitext(filename)[1] or ".png"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
+            tf.write(data)
+            tmp_path = tf.name
+        try:
+            with _TripoClient(api_key=TRIPO3D_API_KEY) as c:
+                # IMPORTANT: keep the object; don't coerce to str
+                tok_obj = c.upload_file(tmp_path)  # returns a FileToken model
+                return tok_obj
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+    return await run_in_threadpool(_run)
+
+
+async def _sdk_create_task(file_token_obj, params: Optional[dict] = None) -> str:
+    """
+    file_token_obj: the FileToken object returned by SDK upload_file()
+    """
+    _sdk_require()
+    params = params or {}
+    mv = os.getenv("TRIPO3D_MODEL_VERSION", "").strip() or "v2.0-20240919"
+
+    def _run():
+        with _TripoClient(api_key=TRIPO3D_API_KEY) as c:
+            # NOTE: pass as 'file_token=', and pass the FileToken OBJECT
+            t = c.image_to_model(file_token=file_token_obj, model_version=mv, **params)
+            return getattr(t, "task_id", t)
+
+    return await run_in_threadpool(_run)
+
+async def _sdk_wait_and_download_glb(task_id: str) -> bytes:
+    """Poll via SDK and return GLB bytes."""
+    _sdk_require()
+
+    def _run():
+        import time, tempfile, os
+        with _TripoClient(api_key=TRIPO3D_API_KEY) as c:
+            poll_sec = float(os.getenv("TRIPO3D_POLL_SECONDS", "2.0"))
+            while True:
+                blob = c.try_download_model(task_id)
+                if blob is None:
+                    time.sleep(poll_sec)
+                    continue
+
+                # 1) If SDK returns raw bytes, just return them
+                if isinstance(blob, (bytes, bytearray)):
+                    return bytes(blob)
+
+                # 2) If SDK returns an object with .save(path), write to a temp file path
+                if hasattr(blob, "save"):
+                    tmp_path = None
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".glb") as tf:
+                            tmp_path = tf.name
+                        blob.save(tmp_path)  # <-- save expects a PATH (string)
+                        with open(tmp_path, "rb") as f:
+                            return f.read()
+                    finally:
+                        if tmp_path:
+                            try:
+                                os.remove(tmp_path)
+                            except Exception:
+                                pass
+
+                # 3) If SDK returns an object with a URL, fetch it
+                url = getattr(blob, "url", None)
+                if url:
+                    r = requests.get(url, timeout=300)
+                    r.raise_for_status()
+                    return r.content
+
+                # Unknown blob type
+                raise RuntimeError(f"Unsupported download blob type: {type(blob)}")
+
+    return await run_in_threadpool(_run)
+
+
 
 # ==========  TripoSR import (local repo) ==========
 TRIPOSR_IMPORT_ERROR: Optional[str] = None
@@ -262,6 +391,182 @@ def json_error(message: str, stage: str, exc: Optional[BaseException] = None) ->
         },
     )
 
+async def _download_bytes(url: str) -> bytes:
+    def _get():
+        r = requests.get(url, timeout=300)
+        r.raise_for_status()
+        return r.content
+    return await run_in_threadpool(_get)
+
+async def _tripo3d_upload_from_bytes(data: bytes, filename: str = "image.png", mime: str = "image/png") -> dict:
+    """
+    Upload to Tripo3D and return dict like:
+      {"file_token": "..."}  (preferred for task creation)
+      and optionally {"url": "..."} if Tripo returns one
+    """
+    if not TRIPO3D_API_KEY:
+        raise HTTPException(500, "TRIPO3D_API_KEY not set")
+
+    def _upload():
+        r = requests.post(
+            f"{TRIPO3D_BASE}/upload",
+            headers={"Authorization": f"Bearer {TRIPO3D_API_KEY}"},
+            files={"file": (filename, data, mime)},
+            timeout=120,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    resp = await run_in_threadpool(_upload)
+    if resp.get("code") != 0:
+        raise HTTPException(502, f"Tripo3D upload error: {resp}")
+
+    # <-- this line was missing in your version
+    d = resp.get("data", {}) or {}
+
+    # Prefer file_token per latest API; older variants used token/image_token
+    token = d.get("file_token") or d.get("image_token") or d.get("token")
+    url = d.get("url") or d.get("image_url")
+
+    if not token and not url:
+        raise HTTPException(502, f"Tripo3D upload returned no file_token or url: {resp}")
+
+    out = {}
+    if token:
+        out["file_token"] = token
+    if url:
+        out["url"] = url  # 'url' (not 'image_url') matches /task schema
+    return out
+
+
+async def _tripo3d_resolve_image_payload(payload: dict) -> dict:
+    if payload.get("b64"):
+        raw = base64.b64decode(payload["b64"])
+        return await _tripo3d_upload_from_bytes(raw)
+
+    if payload.get("url"):
+        # We re-upload so Tripo can fetch it reliably; if you prefer, you can just return {"url": payload["url"]} if it's public.
+        raw = await _download_bytes(payload["url"])
+        mime, fn = "image/png", "image.png"
+        low = payload["url"].lower()
+        if low.endswith((".jpg", ".jpeg")):
+            mime, fn = "image/jpeg", "image.jpg"
+        elif low.endswith(".webp"):
+            mime, fn = "image/webp", "image.webp"
+        return await _tripo3d_upload_from_bytes(raw, filename=fn, mime=mime)
+
+    raise ValueError("Missing 'url' or 'b64' in payload for Tripo3D")
+
+async def tripo3d_create_task(image_spec: dict, params: Optional[dict] = None) -> str:
+    """
+    image_spec: {"file_token": "..."}  OR  {"url": "..."}  (exactly one)
+    Tries multiple payload shapes and with/without model_version.
+    Returns task_id on success; otherwise raises HTTPException with the full error matrix.
+    """
+    if not TRIPO3D_API_KEY:
+        raise HTTPException(500, "TRIPO3D_API_KEY not set")
+
+    # Extract the source once
+    file_token = image_spec.get("file_token")
+    url = image_spec.get("url")
+    if not (file_token or url):
+        raise HTTPException(400, f"tripo3d_create_task: need file_token or url in {image_spec}")
+
+    # Build optional knobs
+    mv = os.getenv("TRIPO3D_MODEL_VERSION", "").strip()  # allow empty (=omit)
+    user_params = params.copy() if isinstance(params, dict) else {}
+
+    def make_payloads():
+        # two “sources”
+        sources = []
+        if file_token:
+            sources += [
+                {"file_token": file_token},
+                {"input": {"file_token": file_token}},
+            ]
+        if url:
+            sources += [
+                {"url": url},
+                {"input": {"url": url}},
+            ]
+
+        # try with model_version first (if provided), then without
+        base_with_mv = ({"type": "image_to_model", "model_version": mv} if mv else None)
+        base_without_mv = {"type": "image_to_model"}
+
+        variants = []
+        for src in sources:
+            if base_with_mv:
+                p = {**base_with_mv, **src, **user_params}
+                variants.append(("with_mv", p))
+            p2 = {**base_without_mv, **src, **user_params}
+            variants.append(("no_mv", p2))
+        return variants
+
+    attempts = make_payloads()
+    tried = []
+
+    for tag, payload in attempts:
+        def _post():
+            r = requests.post(
+                f"{TRIPO3D_BASE}/task",
+                headers={
+                    "Authorization": f"Bearer {TRIPO3D_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=120,
+            )
+            try:
+                data = r.json()
+            except Exception:
+                data = {"non_json_body": r.text, "status_code": r.status_code}
+            return r.status_code, data
+
+        status, data = await run_in_threadpool(_post)
+
+        # Optional: uncomment to see each attempt in container logs
+        # print("DEBUG Tripo3D create", tag, "payload ->", payload, flush=True)
+        # print("DEBUG Tripo3D create", tag, "resp    ->", status, data, flush=True)
+
+        if status == 200 and isinstance(data, dict) and data.get("code") == 0:
+            return data["data"]["task_id"]
+
+        tried.append({"tag": tag, "status": status, "resp": data})
+
+    # All attempts failed — surface everything so we can see the exact rule your tenant enforces
+    raise HTTPException(502, f"Tripo3D create task failed with all payload variants: {tried}")
+
+
+async def tripo3d_poll_until_done(task_id: str) -> dict:
+    """
+    Poll Tripo3D until completion. Returns the 'output' dict (expects 'model_url').
+    """
+    start = time.time()
+    def _get():
+        r = requests.get(
+            f"{TRIPO3D_BASE}/task",
+            headers={"Authorization": f"Bearer {TRIPO3D_API_KEY}"},
+            params={"task_id": task_id},
+            timeout=120,
+        )
+        r.raise_for_status()
+        return r.json()
+    while True:
+        data = await run_in_threadpool(_get)
+        if data.get("code") != 0:
+            raise HTTPException(502, f"Tripo3D task error: {data}")
+        d = data["data"]
+        status = str(d.get("status", "PENDING")).upper()
+        if status in {"SUCCESS", "SUCCEEDED", "DONE", "COMPLETED"}:
+            return d.get("output") or {}
+        if status == "FAILED":
+            raise HTTPException(502, f"Tripo3D task failed: {data}")
+        if time.time() - start > TRIPO3D_TIMEOUT_SECONDS:
+            raise HTTPException(504, "Tripo3D polling timeout")
+        await asyncio.sleep(TRIPO3D_POLL_SECONDS)
+
+
 
 # ========== HEALTH ==========
 @app.get("/health")
@@ -287,6 +592,24 @@ def health():
         "triposr_weights_exists": wgt_exists,
     }
 
+# ========== UPLOAD ==========
+@app.post("/upload")
+async def upload_image(file: UploadFile = File(...)):
+    """
+    Accepts multipart form-data 'file' and saves it under UPLOAD_DIR.
+    Returns a relative URL you can hand back into /image-to-3d/* endpoints.
+    """
+    import uuid, shutil
+    # Preserve extension for type detection
+    ext = ""
+    if "." in file.filename:
+        ext = "." + file.filename.split(".")[-1].lower()
+    fname = f"{uuid.uuid4().hex}{ext or '.png'}"
+    out_path = os.path.join(UPLOAD_DIR, fname)
+    with open(out_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    # Return a path the server can serve and your Unity client can hit
+    return {"url": f"/upload/{fname}"}
 
 # ========== SHAP-E ENDPOINT ==========
 @app.post("/image-to-3d/shap-e")
@@ -450,13 +773,55 @@ def image_to_3d_triposr(payload: dict = Body(...), seed: Optional[int] = None):
     except Exception as e:
         return json_error("TripoSR inference failed", stage="triposr-infer", exc=e)
 
+# ========== TRIPO3D ENDPOINT (cloud, sync) ==========
+@app.post("/image-to-3d/tripo3d")
+async def image_to_3d_tripo3d(payload: dict = Body(...)):
+    try:
+        # ---------- SDK path (recommended) ----------
+        if USE_TRIPO_SDK:
+            # 1) Load bytes from url/b64 (reuse your existing loader)
+            if payload.get("b64"):
+                raw = base64.b64decode(payload["b64"])
+                filename = "image.png"
+            elif payload.get("url"):
+                raw = await _download_bytes(payload["url"])
+                low = payload["url"].lower()
+                filename = "image.jpg" if low.endswith((".jpg", ".jpeg")) else "image.webp" if low.endswith(".webp") else "image.png"
+            else:
+                raise HTTPException(400, "Missing 'url' or 'b64'")
+
+            # 2) Upload via SDK -> file_token
+            file_token = await _sdk_upload_bytes(raw, filename=filename)
+
+            # 3) Optional params pass-through
+            params = payload.get("params") if isinstance(payload, dict) else None
+
+            # 4) Create task & poll
+            task_id = await _sdk_create_task(file_token, params)
+            glb_bytes = await _sdk_wait_and_download_glb(task_id)
+
+            headers = {"Content-Disposition": 'attachment; filename="tripo3d.glb"'}
+            return Response(content=glb_bytes, media_type="model/gltf-binary", headers=headers)
+
+        # ---------- Raw HTTP path (your existing fallback) ----------
+        # (keep your current code here unchanged)
+        # image_spec = await _tripo3d_resolve_image_payload(payload)
+        # params = payload.get("params") if isinstance(payload, dict) else None
+        # prov_task_id = await tripo3d_create_task(image_spec, params)
+        # out = await tripo3d_poll_until_done(prov_task_id)
+        # ... download GLB and return ...
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        return json_error("Tripo3D inference failed", stage="tripo3d", exc=e)
 
 # ========== ROOT ==========
 @app.get("/")
 def root():
     return {
         "service": "2D→3D",
-        "endpoints": ["/health", "/image-to-3d/shap-e", "/image-to-3d/triposr"],
+        "endpoints": ["/health", "/image-to-3d/shap-e", "/image-to-3d/triposr", "/image-to-3d/tripo3d"],
         "device": DEVICE,
     }
 

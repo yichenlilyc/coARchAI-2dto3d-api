@@ -1,12 +1,14 @@
 # 2Dto3D-Server (TripoSR backend)
 
-Containerized **FastAPI** server that wraps **TripoSR** (and optional shap-e) for single-image → 3D reconstruction.  
+Containerized **FastAPI** server that wraps **TripoSR** ,**shap-e**, and **Tripo3D** for single-image → 3D reconstruction.  
 Runs on **GPU (CUDA)** or **CPU**, with optional public access via **Cloudflare Tunnel**.
 
 - ✅ One repo, two targets: `app-gpu` and `app-cpu`  
 - ✅ Reproducible builds with Docker  
 - ✅ Simple health checks & HTTP API  
 - ✅ Optional public URLs (Cloudflare Tunnel)
+- ✅ Tripo3D cloud endpoint (image→model)
+- ✅ Local /upload endpoint for Unity/clients (serves files back at /upload/<file>)
 
 > Tested on Windows 11 + Docker Desktop.  
 > Linux works the same (NVIDIA Container Toolkit required for GPU).
@@ -108,28 +110,38 @@ Then create DNS records (in Cloudflare Dashboard or CLI):
 cloudflared tunnel route dns 2dto3d api-gpu.YOURDOMAIN.com
 cloudflared tunnel route dns 2dto3d api-cpu.YOURDOMAIN.com
 ```
-4) Run (GPU)
+4) Tripo3D setup
+Add to `.env`:
+```bash
+TRIPO3D_API_KEY=tsk-...
+TRIPO3D_BASE=https://api.tripo3d.ai/v2/openapi
+TRIPO3D_MODEL_VERSION=v2.0-20240919
+TRIPO3D_POLL_SECONDS=2.0
+TRIPO3D_TIMEOUT_SECONDS=1800
+USE_TRIPO_SDK=1
+```
+5) Run (GPU)
 ```bash
 docker compose --profile gpu up --build -d
 # optional public URL:
 docker compose --profile tunnel up -d
 ```
-5) Run (CPU)
+6) Run (CPU)
 ```bash
 docker compose --profile cpu up --build -d
 # optional public URL:
 docker compose --profile tunnel up -d
 ```
-6) Test locally
+7) Test locally
 - GPU: http://localhost:8000/health
 - GPU Server listens on http://localhost:8000
 - CPU: http://localhost:8001/health
 - CPU Server listens on http://localhost:8001
 
-7) Test via Cloudflare (if enabled)
+8) Test via Cloudflare (if enabled)
 - GPU: https://api-gpu.YOURDOMAIN.com/health
 - CPU: https://api-cpu.YOURDOMAIN.com/health
-8) Stop
+9) Stop
 ```bash
 docker compose down
 # or stop per profile:
@@ -162,16 +174,79 @@ curl http://localhost:8001/health
   "triposr_weights_exists": true
 }
 ```
-> Add your inference endpoints to scripts/server.py as needed.
+### POST /upload
+Upload a PNG/JPG/WebP and get a URL you can feed to the reconstruction endpoints.
+The server also serves files back at `/upload/<filename>`.
+- Response:
+```bash
+{
+  "url": "/upload/2f4e0a....png"
+}
+```
+### Image → 3D (local Shap-E)
+**POST /image-to-3d/shap-e**
+- Body (JSON): { "url": "<http-url>" } or { "b64": "<base64>" }
+- Optional query:` guidance_scale`, `steps`,` frame_size`
+- Response: GLB model `(model/gltf-binary)`
+**Example**
+```bash
+curl -X POST "http://localhost:8000/image-to-3d/shap-e?steps=64" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"http://localhost:8000/upload/example.png"}' \
+  -o shap-e.glb
+```
+### Image → 3D (local TripoSR)
+**POST /image-to-3d/triposr**
+- Body (JSON): { "url": "<http-url>" } or { "b64": "<base64>" }
+- Optional query:`mc_resolution`, `has_vertex_color`, `seed`, ...
+- Response: GLB model
+**Example**
+```bash
+curl -X POST http://localhost:8000/image-to-3d/triposr \
+  -H "Content-Type: application/json" \
+  -d '{"url":"http://localhost:8000/upload/example.png", "mc_resolution":256}' \
+  -o triposr.glb
+```
+### Image → 3D (Tripo3D cloud)
+**POST /image-to-3d/tripo3d**
+- Uses your `TRIPO3D_API_KEY`
+- Body (JSON): { "url": "<http-url>" } or { "b64": "<base64>" }
+- Optional `params`: `{ "texture": true, "pbr": true, "smart_low_poly": true, "generate_parts": false, ... }`
+- Response: GLB model
+**Example**
+```bash
+curl -X POST http://localhost:8000/image-to-3d/tripo3d \
+  -H "Content-Type: application/json" \
+  -d '{"url":"http://localhost:8000/upload/example.png","params":{"texture":true,"pbr":true}}' \
+  -o tripo3d.glb
+```
+Notes:
+- The server accepts local /upload/... URLs and internally handles Tripo3D upload → task → download.
+- If your Tripo3D tenant requires specific fields (e.g. model_version), we read them from env; you can also pass them via params.
 
 ---
 
 ## Config & Models
 Environment variables (already set in docker-compose.yml):
+### TripoSR
 ```bash
 TRIPOSR_MODEL_DIR=/app/external/TripoSR
 TRIPOSR_CONFIG=config.yaml
 TRIPOSR_WEIGHTS=model.ckpt
+```
+### Tripo3D(cloud)
+```bash
+TRIPO3D_API_KEY=sk-...
+TRIPO3D_BASE=https://api.tripo3d.ai/v2/openapi
+TRIPO3D_MODEL_VERSION=v2.0-20240919
+TRIPO3D_POLL_SECONDS=2.0
+TRIPO3D_TIMEOUT_SECONDS=1800
+USE_TRIPO_SDK=1
+```
+### Upload /URLs
+```bash
+UPLOAD_DIR=/app/upload                  # local folder for /upload
+PUBLIC_BASE_URL=http://localhost:8000   # optional, return absolute URLs
 ```
 The repo volume-mounts the whole project into the container at `/app`, so you can modify files without rebuilding.
 
@@ -320,6 +395,7 @@ external/TripoSR/outputs/
 This repo glues together FastAPI + TripoSR + shap-e for containerized serving.
 - TripoSR is © its original authors; please follow their license/usage terms for the model and code.
 - shap-e is © its original authors; please follow their license/usage terms for the model and code.
+- Tripo3D is © its original authors; please follow their license/usage terms for the model and code.
 - CUDA®, NVIDIA®, and product names are trademarks of their respective owners.
 
 ---
