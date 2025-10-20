@@ -73,8 +73,8 @@ docker run --gpus all nvidia/cuda:12.6.2-base-ubuntu24.04 nvidia-smi
 ## Quick Start (local)
 1) Clone & prepare
 ```bash
-git clone https://github.com/YOU/2DTo3D-Server.git
-cd 2DTo3D-Server
+git clone https://github.com/yichenlilyc/coARchAI-2dto3d-api.git
+cd coARchAI-2dto3d-api
 cp .env.example .env
 ```
 2) Put model files
