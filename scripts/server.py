@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 from fastapi import UploadFile, File
 from fastapi.staticfiles import StaticFiles
+from datetime import datetime
 
 
 # --- CONFIG / DEVICE ---
@@ -38,7 +39,7 @@ CUDA_OK = torch.cuda.is_available() and USE_CUDA
 DEVICE = "cuda" if CUDA_OK else "cpu"
 DTYPE = torch.float16 if CUDA_OK else torch.float32
 
-
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
 # --- Tripo3D (cloud) config ---
 TRIPO3D_API_KEY = os.getenv("TRIPO3D_API_KEY", "")  # REQUIRED for /image-to-3d/tripo3d
@@ -590,6 +591,31 @@ async def upload_image(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, f)
     return {"url": f"/upload/{fname}"}
 
+# ========== UPLOAD GALLERY  ==========
+@app.get("/uploads")
+def list_uploads(limit: int = 100, offset: int = 0):
+    items = []
+    for name in os.listdir(UPLOAD_DIR):
+        if name.startswith("."):
+            continue
+        path = os.path.join(UPLOAD_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        stat = os.stat(path)
+        rel = f"/upload/{name}"
+        url = f"{PUBLIC_BASE_URL}{rel}" if PUBLIC_BASE_URL else rel
+        items.append({
+            "name": name,
+            "url": url,
+            "size": stat.st_size,
+            "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat()
+        })
+    # newest first
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    total = len(items)
+    items = items[offset:offset+limit]
+    return {"count": total, "items": items, "limit": limit, "offset": offset}
+
 # ========== SHAP-E ENDPOINT ==========
 @app.post("/image-to-3d/shap-e")
 def image_to_3d_shape(
@@ -781,6 +807,7 @@ async def image_to_3d_tripo3d(payload: dict = Body(...)):
         raise
     except Exception as e:
         return json_error("Tripo3D inference failed", stage="tripo3d", exc=e)
+    
 
 # ========== ROOT ==========
 @app.get("/")
