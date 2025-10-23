@@ -21,6 +21,9 @@ import trimesh
 
 import asyncio
 import time
+import json
+import hashlib
+from urllib.parse import urlencode, quote
 
 from fastapi import FastAPI, Body, HTTPException
 from fastapi.responses import Response, JSONResponse
@@ -41,6 +44,12 @@ DTYPE = torch.float16 if CUDA_OK else torch.float32
 
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
+# --- Firebase RTDB (REST) config ---
+FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL", "").rstrip("/")
+FIREBASE_DB_AUTH = os.getenv("FIREBASE_DB_AUTH", "")
+FB_UPLOAD_DIR = os.getenv("FB_UPLOAD_DIR", "/app/fbupload")
+os.makedirs(FB_UPLOAD_DIR, exist_ok=True)
+
 # --- Tripo3D (cloud) config ---
 TRIPO3D_API_KEY = os.getenv("TRIPO3D_API_KEY", "")  # REQUIRED for /image-to-3d/tripo3d
 USE_TRIPO_SDK = bool(int(os.getenv("USE_TRIPO_SDK", "1"))) 
@@ -48,6 +57,7 @@ TRIPO3D_BASE = os.getenv("TRIPO3D_BASE", "https://api.tripo3d.ai/v2/openapi")
 TRIPO3D_MODEL_VERSION = os.getenv("TRIPO3D_MODEL_VERSION", "v2.0-20240919")
 TRIPO3D_POLL_SECONDS = float(os.getenv("TRIPO3D_POLL_SECONDS", "2.0"))
 TRIPO3D_TIMEOUT_SECONDS = float(os.getenv("TRIPO3D_TIMEOUT_SECONDS", "1800"))  # 30min
+
 
 app = FastAPI(title="2D→3D Service (Shap-E + Tripo)")
 app.add_middleware(
@@ -59,6 +69,7 @@ app.add_middleware(
 )
 
 app.mount("/upload", StaticFiles(directory=UPLOAD_DIR), name="upload")
+app.mount("/fbupload", StaticFiles(directory=FB_UPLOAD_DIR), name="fbupload")
 
 # ---- Tripo SDK path (robust against schema differences) ----
 try:
@@ -119,22 +130,72 @@ async def _sdk_create_task(file_token_obj, params: Optional[dict] = None) -> str
 
     return await run_in_threadpool(_run)
 
+# async def _sdk_wait_and_download_glb(task_id: str) -> bytes:
+#     """Poll via SDK and return GLB bytes."""
+#     _sdk_require()
+
+#     def _run():
+#         import time, tempfile, os
+#         with _TripoClient(api_key=TRIPO3D_API_KEY) as c:
+#             poll_sec = float(os.getenv("TRIPO3D_POLL_SECONDS", "2.0"))
+#             while True:
+#                 blob = c.try_download_model(task_id)
+#                 if blob is None:
+#                     time.sleep(poll_sec)
+
+#                 if isinstance(blob, (bytes, bytearray)):
+#                     return bytes(blob)
+#                 if hasattr(blob, "save"):
+#                     tmp_path = None
+#                     try:
+#                         with tempfile.NamedTemporaryFile(delete=False, suffix=".glb") as tf:
+#                             tmp_path = tf.name
+#                         blob.save(tmp_path)
+#                         with open(tmp_path, "rb") as f:
+#                             return f.read()
+#                     finally:
+#                         if tmp_path:
+#                             try:
+#                                 os.remove(tmp_path)
+#                             except Exception:
+#                                 pass
+
+#                 url = getattr(blob, "url", None)
+#                 if url:
+#                     r = requests.get(url, timeout=300)
+#                     r.raise_for_status()
+#                     return r.content
+
+#                 raise RuntimeError(f"Unsupported download blob type: {type(blob)}")
+
+#     return await run_in_threadpool(_run)
+
 async def _sdk_wait_and_download_glb(task_id: str) -> bytes:
     """Poll via SDK and return GLB bytes."""
     _sdk_require()
 
     def _run():
         import time, tempfile, os
+        # respect env-configured timeout / poll interval
+        poll_sec = float(os.getenv("TRIPO3D_POLL_SECONDS", "2.0"))
+        deadline = time.time() + float(os.getenv("TRIPO3D_TIMEOUT_SECONDS", "1800"))
+
         with _TripoClient(api_key=TRIPO3D_API_KEY) as c:
-            poll_sec = float(os.getenv("TRIPO3D_POLL_SECONDS", "2.0"))
             while True:
                 blob = c.try_download_model(task_id)
-                if blob is None:
-                    time.sleep(poll_sec)
 
+                # Not ready yet -> wait and try again
+                if blob is None:
+                    if time.time() > deadline:
+                        raise TimeoutError("Tripo3D polling timeout")
+                    time.sleep(poll_sec)
+                    continue  # <<< important
+
+                # Ready -> several possible shapes:
                 if isinstance(blob, (bytes, bytearray)):
                     return bytes(blob)
-                if hasattr(blob, "save"):
+
+                if hasattr(blob, "save"):  # SDK object with .save(path)
                     tmp_path = None
                     try:
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".glb") as tf:
@@ -144,10 +205,8 @@ async def _sdk_wait_and_download_glb(task_id: str) -> bytes:
                             return f.read()
                     finally:
                         if tmp_path:
-                            try:
-                                os.remove(tmp_path)
-                            except Exception:
-                                pass
+                            try: os.remove(tmp_path)
+                            except Exception: pass
 
                 url = getattr(blob, "url", None)
                 if url:
@@ -158,7 +217,6 @@ async def _sdk_wait_and_download_glb(task_id: str) -> bytes:
                 raise RuntimeError(f"Unsupported download blob type: {type(blob)}")
 
     return await run_in_threadpool(_run)
-
 
 
 # ==========  TripoSR import (local repo) ==========
@@ -392,6 +450,53 @@ async def _download_bytes(url: str) -> bytes:
         return r.content
     return await run_in_threadpool(_get)
 
+def _fb_json_url(path: str, params: dict | None = None) -> str:
+    if not FIREBASE_DB_URL:
+        raise RuntimeError("FIREBASE_DB_URL not set")
+    path = path.strip("/")
+    q = dict(params or {})
+    if FIREBASE_DB_AUTH:
+        q["auth"] = FIREBASE_DB_AUTH
+    qs = ("?" + urlencode(q, safe=":$,()\"")) if q else ""
+    return f"{FIREBASE_DB_URL}/{quote(path)}.json{qs}"
+
+def _fb_fetch(path: str, params: dict | None = None, timeout: int = 20):
+    url = _fb_json_url(path, params)
+    r = requests.get(url, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+def _decode_data_url_to_bytes(data_url: str) -> bytes:
+    """
+    Accepts 'data:image/...;base64,...' OR raw base64 string.
+    Returns decoded bytes (original format).
+    """
+    s = (data_url or "").strip()
+    if s.lower().startswith("data:") and ";base64," in s:
+        s = s.split(";base64,", 1)[1]
+    return base64.b64decode(s)
+
+def _write_png_to_fb(bytes_: bytes, suggested_name: str | None = None) -> str:
+    """
+    Convert any image bytes to PNG and save into FB_UPLOAD_DIR.
+    File name: <suggested>_<sha16>.png  (dedup by content hash).
+    Returns the filename.
+    """
+    os.makedirs(FB_UPLOAD_DIR, exist_ok=True)
+    # load & re-encode to PNG
+    img = Image.open(io.BytesIO(bytes_))
+    if img.mode not in ("RGB", "RGBA"):
+        img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+
+    h = hashlib.sha1(bytes_).hexdigest()[:16]
+    prefix = (Path(suggested_name).stem + "_") if suggested_name else ""
+    fname = f"{prefix}{h}.png"
+    fpath = os.path.join(FB_UPLOAD_DIR, fname)
+    if not os.path.exists(fpath):
+        with open(fpath, "wb") as f:
+            img.save(f, format="PNG")
+    return fname
+
 async def _tripo3d_upload_from_bytes(data: bytes, filename: str = "image.png", mime: str = "image/png") -> dict:
     """
     Upload to Tripo3D and return dict like:
@@ -616,6 +721,147 @@ def list_uploads(limit: int = 100, offset: int = 0):
     items = items[offset:offset+limit]
     return {"count": total, "items": items, "limit": limit, "offset": offset}
 
+# ========== FIREBASE -> FBUpload ==========
+@app.post("/firebase/sync-to-fbupload")
+def firebase_sync_to_fbupload(payload: dict = Body(...)):
+    """
+    Body:
+      { "user": "student_c00", "limit": 200 }
+      or
+      { "user": "*", "limit": 200 }  # sync all users
+    """
+    try:
+        user = payload.get("user")
+        limit = int(payload.get("limit", 200))
+        if not FIREBASE_DB_URL:
+            return json_error("FIREBASE_DB_URL not configured", stage="firebase-sync-fb")
+
+        def fetch_gallery_for_user(ukey: str):
+            path = f"users/{ukey}/gallery"
+            data = _fb_fetch(path, params={"orderBy": json.dumps("$key"), "limitToLast": limit})
+            return data if isinstance(data, dict) else {}
+
+        users_to_scan = []
+        if user == "*" or user == "all":
+            # enumerate all users
+            users_obj = _fb_fetch("users")
+            if isinstance(users_obj, dict):
+                users_to_scan = list(users_obj.keys())
+        else:
+            if not user:
+                return json_error("Missing 'user' in payload", stage="firebase-sync-fb")
+            users_to_scan = [user]
+
+        public_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+        total_items = []
+        for u in users_to_scan:
+            data = fetch_gallery_for_user(u)
+            ordered = sorted(data.items(), key=lambda kv: kv[0], reverse=True)
+
+            for key, val in ordered:
+                if not isinstance(val, dict):
+                    continue
+                img_data = val.get("image")
+                if not img_data:
+                    continue
+
+                try:
+                    raw = _decode_data_url_to_bytes(img_data)
+                    # filename hint: include user and key
+                    fname = _write_png_to_fb(raw, suggested_name=f"{u}_{key}")
+                except Exception:
+                    continue
+
+                rel = f"/fbupload/{fname}"
+                url = f"{public_base}{rel}" if public_base else rel
+                total_items.append({
+                    "user": u,
+                    "id": key,
+                    "name": fname,
+                    "url": url,
+                    "prompt": val.get("prompt", ""),
+                    "timestamp": val.get("timestamp", ""),
+                    "version": val.get("version", ""),
+                })
+
+        return {"synced": len(total_items), "items": total_items}
+    except Exception as e:
+        return json_error("Firebase sync to fbupload failed", stage="firebase-sync-fb", exc=e)
+
+    """
+    Body: { "user": "student_c00", "limit": 200 }
+    Fetch base64 images from users/<user>/_gallery, convert to PNG,
+    save into FB_UPLOAD_DIR, and return their /fbupload URLs.
+    """
+    try:
+        user = payload.get("user")
+        limit = int(payload.get("limit", 200))
+        if not user:
+            return json_error("Missing 'user' in payload", stage="firebase-sync-fb")
+
+        if not FIREBASE_DB_URL:
+            return json_error("FIREBASE_DB_URL not configured", stage="firebase-sync-fb")
+
+        path = f"users/{user}/gallery"
+        data = _fb_fetch(path, params={"orderBy": json.dumps("$key"), "limitToLast": limit})
+        if not isinstance(data, dict):
+            return {"synced": 0, "items": []}
+
+        ordered = sorted(data.items(), key=lambda kv: kv[0], reverse=True)
+        public_base = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+
+        out = []
+        for key, val in ordered:
+            if not isinstance(val, dict):
+                continue
+            img_data = val.get("image")
+            if not img_data:
+                continue
+
+            try:
+                raw = _decode_data_url_to_bytes(img_data)
+                fname = _write_png_to_fb(raw, suggested_name=key)  # ALWAYS PNG into FB dir
+            except Exception:
+                continue
+
+            rel = f"/fbupload/{fname}"
+            url = f"{public_base}{rel}" if public_base else rel
+            out.append({
+                "id": key,
+                "name": fname,
+                "url": url,
+                "prompt": val.get("prompt", ""),
+                "timestamp": val.get("timestamp", ""),
+                "version": val.get("version", ""),
+            })
+
+        return {"synced": len(out), "items": out}
+    except Exception as e:
+        return json_error("Firebase sync to fbupload failed", stage="firebase-sync-fb", exc=e)
+
+@app.get("/fbuploads")
+def list_fbuploads(limit: int = 100, offset: int = 0):
+    items = []
+    for name in os.listdir(FB_UPLOAD_DIR):
+        if name.startswith("."):
+            continue
+        path = os.path.join(FB_UPLOAD_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        st = os.stat(path)
+        rel = f"/fbupload/{name}"
+        url = f"{PUBLIC_BASE_URL}{rel}" if PUBLIC_BASE_URL else rel
+        items.append({
+            "name": name,
+            "url": url,
+            "size": st.st_size,
+            "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(),
+        })
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    total = len(items)
+    items = items[offset:offset+limit]
+    return {"count": total, "items": items, "limit": limit, "offset": offset}
+
 # ========== SHAP-E ENDPOINT ==========
 @app.post("/image-to-3d/shap-e")
 def image_to_3d_shape(
@@ -814,7 +1060,15 @@ async def image_to_3d_tripo3d(payload: dict = Body(...)):
 def root():
     return {
         "service": "2D→3D",
-        "endpoints": ["/health", "/image-to-3d/shap-e", "/image-to-3d/triposr", "/image-to-3d/tripo3d"],
+        "endpoints": [
+            "/health",
+            "/upload", "/uploads",
+            "/fbupload", "/fbuploads",
+            "/image-to-3d/shap-e",
+            "/image-to-3d/triposr",
+            "/image-to-3d/tripo3d",
+            "/firebase/sync-to-fbupload",
+        ],
         "device": DEVICE,
     }
 

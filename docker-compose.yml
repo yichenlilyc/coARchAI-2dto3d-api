@@ -29,8 +29,13 @@ services:
       TRIPO3D_MODEL_VERSION: "v2.0-20240919"
       TRIPO3D_POLL_SECONDS: "2.0"
       TRIPO3D_TIMEOUT_SECONDS: "1800"
+      FIREBASE_DB_URL: ${FIREBASE_DB_URL}
+      FIREBASE_DB_AUTH: ${FIREBASE_DB_AUTH:-}   # optional; empty if not set
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     volumes:
       - .:/app:rw
+      - ./upload:/app/upload
+      - ./fbupload:/app/fbupload  
     ports:
       - "8000:8000"
     command: >
@@ -51,8 +56,13 @@ services:
       TRIPO3D_MODEL_VERSION: "v2.0-20240919"
       TRIPO3D_POLL_SECONDS: "2.0"
       TRIPO3D_TIMEOUT_SECONDS: "1800"
+      FIREBASE_DB_URL: ${FIREBASE_DB_URL}
+      FIREBASE_DB_AUTH: ${FIREBASE_DB_AUTH:-}   # optional; empty if not set
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     volumes:
       - .:/app:rw
+      - ./upload:/app/upload
+      - ./fbupload:/app/fbupload  
     ports:
       - "8001:8000"
     command: >
