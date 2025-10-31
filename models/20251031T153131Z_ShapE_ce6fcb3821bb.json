@@ -1,0 +1,14 @@
+{
+  "name": "20251031T153131Z_ShapE_ce6fcb3821bb.glb",
+  "url": "https://api-gpu.yichenliclaire.com/model/20251031T153131Z_ShapE_ce6fcb3821bb.glb",
+  "engine": "ShapE",
+  "source_url": "https://api-gpu.yichenliclaire.com/fbupload/unknown_1758733408707_bfa6864532be85db.png",
+  "seed": null,
+  "params": {
+    "guidance_scale": 3.0,
+    "steps": 64,
+    "frame_size": 256
+  },
+  "size": 2686348,
+  "mtime": "2025-10-31T15:31:31.713770Z"
+}

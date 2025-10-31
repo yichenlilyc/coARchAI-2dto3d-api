@@ -1,0 +1,14 @@
+{
+  "name": "20251031T184735Z_ShapE_53a92f41782b.glb",
+  "url": "https://api-gpu.yichenliclaire.com/model/20251031T184735Z_ShapE_53a92f41782b.glb",
+  "engine": "ShapE",
+  "source_url": "https://api-gpu.yichenliclaire.com/upload/704d9bcd6cba41e7ac63e5a6612301a9.png",
+  "seed": null,
+  "params": {
+    "guidance_scale": 3.0,
+    "steps": 64,
+    "frame_size": 256
+  },
+  "size": 1591148,
+  "mtime": "2025-10-31T18:47:35.119935Z"
+}

@@ -23,6 +23,7 @@ import asyncio
 import time
 import json
 import hashlib
+import uuid
 from urllib.parse import urlencode, quote
 
 from fastapi import FastAPI, Body, HTTPException
@@ -31,8 +32,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 from fastapi import UploadFile, File
 from fastapi.staticfiles import StaticFiles
+from fastapi import UploadFile, File
 from datetime import datetime
+from fastapi import BackgroundTasks, Query
+from fastapi.responses import FileResponse
+import zipfile
 
+# --- MODEL OUTPUTS ---
+MODELS_DIR = os.getenv("MODELS_DIR", "/app/models")
+os.makedirs(MODELS_DIR, exist_ok=True)
 
 # --- CONFIG / DEVICE ---
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/app/upload")
@@ -70,6 +78,7 @@ app.add_middleware(
 
 app.mount("/upload", StaticFiles(directory=UPLOAD_DIR), name="upload")
 app.mount("/fbupload", StaticFiles(directory=FB_UPLOAD_DIR), name="fbupload")
+app.mount("/model", StaticFiles(directory=MODELS_DIR), name="model")
 
 # ---- Tripo SDK path (robust against schema differences) ----
 try:
@@ -653,7 +662,42 @@ async def tripo3d_poll_until_done(task_id: str) -> dict:
             raise HTTPException(504, "Tripo3D polling timeout")
         await asyncio.sleep(TRIPO3D_POLL_SECONDS)
 
+def _save_model_glb(glb_bytes: bytes, engine: str, *, 
+                    source_url: str | None = None, 
+                    seed: int | None = None, 
+                    params: dict | None = None) -> dict:
+    """
+    Saves the GLB into MODELS_DIR and writes a sidecar JSON.
+    Returns a dict with server URL and metadata.
+    """
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    uid = uuid.uuid4().hex[:12]
+    base = f"{ts}_{engine}_{uid}"
+    glb_name = f"{base}.glb"
+    glb_path = os.path.join(MODELS_DIR, glb_name)
 
+    with open(glb_path, "wb") as f:
+        f.write(glb_bytes)
+
+    rel = f"/model/{glb_name}"
+    url = f"{PUBLIC_BASE_URL}{rel}" if PUBLIC_BASE_URL else rel
+
+    meta = {
+        "name": glb_name,
+        "url": url,
+        "engine": engine,
+        "source_url": source_url,
+        "seed": seed,
+        "params": params or {},
+        "size": len(glb_bytes),
+        "mtime": datetime.utcnow().isoformat() + "Z",
+    }
+    with open(os.path.join(MODELS_DIR, f"{base}.json"), "w", encoding="utf-8") as jf:
+        json.dump(meta, jf, ensure_ascii=False, indent=2)
+
+    return meta
+
+# ------------ ENDPOINT ------------
 
 # ========== HEALTH ==========
 @app.get("/health")
@@ -862,6 +906,164 @@ def list_fbuploads(limit: int = 100, offset: int = 0):
     items = items[offset:offset+limit]
     return {"count": total, "items": items, "limit": limit, "offset": offset}
 
+# ========== save model ==========
+@app.get("/models")
+def list_models(limit: int = 100, offset: int = 0):
+    items = []
+    for name in os.listdir(MODELS_DIR):
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(MODELS_DIR, name), "r", encoding="utf-8") as jf:
+                meta = json.load(jf)
+                items.append(meta)
+        except Exception:
+            # fallback: synthesize minimal info from the GLB if JSON missing
+            stem = name[:-5]
+            glb = stem + ".glb"
+            glb_path = os.path.join(MODELS_DIR, glb)
+            if os.path.isfile(glb_path):
+                st = os.stat(glb_path)
+                items.append({
+                    "name": glb,
+                    "url": f"/model/{glb}",
+                    "engine": "unknown",
+                    "source_url": None,
+                    "seed": None,
+                    "params": {},
+                    "size": st.st_size,
+                    "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(),
+                })
+
+    # newest first by mtime
+    items.sort(key=lambda x: x.get("mtime", ""), reverse=True)
+    total = len(items)
+    items = items[offset:offset+limit]
+    return {"count": total, "items": items, "limit": limit, "offset": offset}
+
+@app.post("/models")
+async def save_model(file: UploadFile = File(...)):
+    """
+    Accepts multipart form-data 'file' (GLB) and saves into MODELS_DIR.
+    Returns the saved URL + name.
+    """
+    import uuid, shutil
+    name = file.filename or "model.glb"
+    # force .glb extension for consistency
+    if not name.lower().endswith(".glb"):
+        name = name + ".glb"
+    # ensure unique
+    stem = Path(name).stem
+    fname = f"{stem}_{uuid.uuid4().hex[:8]}.glb"
+    out_path = os.path.join(MODELS_DIR, fname)
+
+    with open(out_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    rel = f"/model/{fname}"
+    url = f"{PUBLIC_BASE_URL}{rel}" if PUBLIC_BASE_URL else rel
+    # write a minimal sidecar so it appears in GET /models
+    meta = {
+        "name": fname,
+        "url": url,
+        "engine": "upload",
+        "source_url": None,
+        "seed": None,
+        "params": {},
+        "size": os.stat(out_path).st_size,
+        "mtime": datetime.utcnow().isoformat() + "Z",
+    }
+    with open(os.path.join(MODELS_DIR, f"{Path(fname).stem}.json"), "w", encoding="utf-8") as jf:
+        json.dump(meta, jf, ensure_ascii=False, indent=2)
+
+    return {"url": url, "name": fname}
+
+@app.get("/models/archive")
+def download_models_zip(
+    background_tasks: BackgroundTasks,
+    engine: Optional[str] = Query(None, description="Filter by engine name (e.g., Tripo3D, TripoSR, ShapE)"),
+    since: Optional[str] = Query(None, description="ISO timestamp (UTC) — include files modified AT or AFTER this time"),
+    limit: Optional[int] = Query(None, description="Max number of most-recent models to include"),
+):
+    """
+    Create a ZIP containing generated GLB models from /model.
+    Filters:
+      - engine: only include models whose sidecar JSON has matching `engine`
+      - since:  ISO UTC like '2025-10-31T00:00:00Z'
+      - limit:  cap count after sorting by mtime desc
+    """
+    items = []
+    for name in os.listdir(MODELS_DIR):
+        if not name.endswith(".json"):
+            continue
+        meta_path = os.path.join(MODELS_DIR, name)
+        try:
+            with open(meta_path, "r", encoding="utf-8") as jf:
+                meta = json.load(jf)
+        except Exception:
+            continue
+
+        glb_name = Path(name).stem + ".glb"
+        glb_path = os.path.join(MODELS_DIR, glb_name)
+        if not os.path.isfile(glb_path):
+            continue
+
+        if engine and str(meta.get("engine", "")).lower() != engine.lower():
+            continue
+
+        mt = meta.get("mtime")
+        try:
+            mt_dt = datetime.fromisoformat(mt.replace("Z","+00:00")) if mt else None
+        except Exception:
+            mt_dt = None
+
+        items.append({
+            "glb_name": glb_name,
+            "glb_path": glb_path,
+            "mtime": mt_dt or datetime.utcfromtimestamp(os.path.getmtime(glb_path)),
+        })
+
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z","+00:00"))
+            items = [it for it in items if it["mtime"] >= since_dt]
+        except Exception:
+            pass 
+
+    items.sort(key=lambda it: it["mtime"], reverse=True)
+
+    if isinstance(limit, int) and limit and limit > 0:
+        items = items[:limit]
+
+    if not items:
+        raise HTTPException(404, "No models match the criteria.")
+
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    tmp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=f"_models_{ts}.zip")
+    tmp_zip_path = tmp_zip.name
+    tmp_zip.close()
+
+    with zipfile.ZipFile(tmp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for it in items:
+            zf.write(it["glb_path"], arcname=it["glb_name"])
+            meta_name = Path(it["glb_name"]).stem + ".json"
+            meta_path = os.path.join(MODELS_DIR, meta_name)
+            if os.path.isfile(meta_path):
+                zf.write(meta_path, arcname=meta_name)
+
+    background_tasks.add_task(os.remove, tmp_zip_path)
+
+    headers = {
+        "Cache-Control": "no-store",
+    }
+    return FileResponse(
+        tmp_zip_path,
+        media_type="application/zip",
+        filename=f"models_{ts}.zip",
+        headers=headers,
+        background=background_tasks
+    )
+
 # ========== SHAP-E ENDPOINT ==========
 @app.post("/image-to-3d/shap-e")
 def image_to_3d_shape(
@@ -900,7 +1102,12 @@ def image_to_3d_shape(
             mesh = trimesh.load(ply_path)  # read as trimesh
             glb_bytes = mesh_to_glb_bytes(mesh)
 
-        headers = {"Content-Disposition": 'attachment; filename="shap-e.glb"'}
+        meta = _save_model_glb(glb_bytes, engine="ShapE", source_url=payload.get("url"), seed=None,
+                       params={"guidance_scale": guidance_scale, "steps": steps, "frame_size": frame_size})
+        headers = {
+            "Content-Disposition": 'attachment; filename="shap-e.glb"',
+            "X-Model-URL": meta["url"],
+        }
         return Response(content=glb_bytes, media_type="model/gltf-binary", headers=headers)
     except Exception as e:
         return json_error("Shap-E inference failed", stage="shape-infer", exc=e)
@@ -1018,9 +1225,13 @@ def image_to_3d_triposr(payload: dict = Body(...), seed: Optional[int] = None):
             raise RuntimeError("Failed to convert TripoSR output to a mesh.")
 
         glb_bytes = mesh_to_glb_bytes(tri)
-        headers = {"Content-Disposition": 'attachment; filename="triposr.glb"'}
+        meta = _save_model_glb(glb_bytes, engine="TripoSR", source_url=payload.get("url"), seed=seed,
+                       params={"mc_resolution": payload.get("mc_resolution"), "has_vertex_color": payload.get("has_vertex_color")})
+        headers = {
+            "Content-Disposition": 'attachment; filename="triposr.glb"',
+            "X-Model-URL": meta["url"],
+        }
         return Response(content=glb_bytes, media_type="model/gltf-binary", headers=headers)
-
     except Exception as e:
         return json_error("TripoSR inference failed", stage="triposr-infer", exc=e)
 
@@ -1046,9 +1257,13 @@ async def image_to_3d_tripo3d(payload: dict = Body(...)):
             task_id = await _sdk_create_task(file_token, params)
             glb_bytes = await _sdk_wait_and_download_glb(task_id)
 
-            headers = {"Content-Disposition": 'attachment; filename="tripo3d.glb"'}
+            meta = _save_model_glb(glb_bytes, engine="Tripo3D", source_url=payload.get("url"), seed=None,
+                       params=(payload.get("params") if isinstance(payload, dict) else {}))
+            headers = {
+                "Content-Disposition": 'attachment; filename="tripo3d.glb"',
+                "X-Model-URL": meta["url"],
+            }
             return Response(content=glb_bytes, media_type="model/gltf-binary", headers=headers)
-
     except HTTPException:
         raise
     except Exception as e:
@@ -1064,6 +1279,8 @@ def root():
             "/health",
             "/upload", "/uploads",
             "/fbupload", "/fbuploads",
+            "/models (GET list, POST upload)",
+            "/model/<file> (static)",
             "/image-to-3d/shap-e",
             "/image-to-3d/triposr",
             "/image-to-3d/tripo3d",
