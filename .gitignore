@@ -19,3 +19,7 @@ external/TripoSR/models/
 # Cloudflared
 cloudflared/*.json
 cloudflared/cert.pem
+
+# Generated outputs
+generated/
+fbupload/
