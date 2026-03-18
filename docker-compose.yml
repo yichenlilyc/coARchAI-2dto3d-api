@@ -1,21 +1,21 @@
 version: "3.9"
 
 services:
-  app-gpu:
-    build:
+  # GPU 0 : Main API app
+  api-main: 
+    build: 
       context: .
       dockerfile: docker/Dockerfile.gpu
       args:
-        CUDA_ARCH_LIST: "120"        # RTX 5090 (sm_120)
-        TORCH_CUDA_ARCH_DOT: "12.0"
+        HF_TOKEN: ${HF_TOKEN}
     deploy:
-      resources:
+      resources: 
         reservations:
           devices:
             - driver: nvidia
+              device_ids: ['0']
               capabilities: [gpu]
     environment:
-      # --- app/settings.py reads these ---
       GENERATED_IMAGES_DIR: /app/generated/images
       GENERATED_MODELS_DIR: /app/generated/models
       FB_UPLOAD_DIR: /app/fbupload
@@ -24,6 +24,8 @@ services:
       PRESET_MODELS_DIR: /app/data/presets/models
       UPLOAD_MODELS_DIR: /app/data/uploads/models
 
+      SAM_TASKS_DIR: /app/tasks
+      SAM_TEMP_DIR: /app/temp
       USE_CUDA: "1"
 
       TRIPOSR_MODEL_DIR: /app/external/TripoSR
@@ -41,66 +43,55 @@ services:
       FIREBASE_DB_AUTH: ${FIREBASE_DB_AUTH:-}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
 
-      # (optional) keep your old NVTX toggles; harmless if unused
-      USE_NVTX: "0"
-      CAFFE2_USE_NVTX: "0"
-    volumes:
+      SAM_WORKER_URL: "http://sam-worker:8001/process-3d"
+    volumes: 
       - .:/app:rw
       - ./generated:/app/generated
       - ./fbupload:/app/fbupload
       - ./data:/app/data
-    ports:
+      - ./tasks:/app/tasks
+      - ./temp:/app/temp
+      - ./checkpoints:/app/checkpoints
+    ports: 
       - "8000:8000"
     command: >
       uvicorn app.main:app
       --host 0.0.0.0 --port 8000 --workers 1
 
-  app-cpu:
+  # GPU 1 : SAM 3D worker API
+  sam-worker: 
     build:
       context: .
-      dockerfile: docker/Dockerfile.cpu
+      dockerfile: docker/Dockerfile.gpu
+      args: 
+        HF_TOKEN: ${HF_TOKEN}
+    deploy:
+      resources:
+        reservations: 
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
     environment:
-      GENERATED_IMAGES_DIR: /app/generated/images
       GENERATED_MODELS_DIR: /app/generated/models
-      FB_UPLOAD_DIR: /app/fbupload
-
-      PRESET_MAPS_DIR: /app/data/presets/maps
-      PRESET_MODELS_DIR: /app/data/presets/models
-      UPLOAD_MODELS_DIR: /app/data/uploads/models
-
-      USE_CUDA: "0"
-
-      TRIPOSR_MODEL_DIR: /app/external/TripoSR
-      TRIPOSR_CONFIG: config.yaml
-      TRIPOSR_WEIGHTS: model.ckpt
-
-      TRIPO3D_API_KEY: "${TRIPO3D_API_KEY}"
-      USE_TRIPO_SDK: "1"
-      TRIPO3D_BASE: "https://api.tripo3d.ai/v2/openapi"
-      TRIPO3D_MODEL_VERSION: "v2.0-20240919"
-      TRIPO3D_POLL_SECONDS: "2.0"
-      TRIPO3D_TIMEOUT_SECONDS: "1800"
-
-      FIREBASE_DB_URL: ${FIREBASE_DB_URL}
-      FIREBASE_DB_AUTH: ${FIREBASE_DB_AUTH:-}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      SAM_TASKS_DIR: /app/tasks
+      SAM_TEMP_DIR: /app/temp
     volumes:
       - .:/app:rw
       - ./generated:/app/generated
-      - ./fbupload:/app/fbupload
-      - ./data:/app/data
-    ports:
-      - "8001:8000"
+      - ./tasks:/app/tasks
+      - ./temp:/app/temp
+      - ./checkpoints:/app/checkpoints
     command: >
-      uvicorn app.main:app
-      --host 0.0.0.0 --port 8000 --workers 1
+      /root/miniconda3/envs/sam3d-objects/bin/python -m uvicorn app.services.sam3d_worker:app
+      --host 0.0.0.0 --port 8001
 
   cloudflared:
     image: cloudflare/cloudflared:latest
     profiles: ["tunnel"]
     restart: unless-stopped
     depends_on:
-      - app-gpu
+      - api-main
     command:
       - tunnel
       - --no-autoupdate
