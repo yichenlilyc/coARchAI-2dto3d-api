@@ -21,7 +21,11 @@ UPLOAD_MODELS_DIR = os.getenv("UPLOAD_MODELS_DIR", "/app/data/uploads/models")
 for d in (PRESET_MAPS_DIR, PRESET_MODELS_DIR, UPLOAD_MODELS_DIR):
     os.makedirs(d, exist_ok=True)
 
-ALLOWED_MODEL_EXTS = {".glb",".obj"}
+ALLOWED_PRESET_2D_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+ALLOWED_PRESET_3D_EXTS = {".glb",".obj"}
+
+ALLOWED_PREVIEW_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+ALLOWED_MODEL_EXTS = {".glb", ".obj"}
 
 # --- DEVICE ---
 USE_CUDA = bool(int(os.getenv("USE_CUDA", "0")))

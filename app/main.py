@@ -28,6 +28,10 @@ def create_app() -> FastAPI:
     app.mount("/static/generated/models", StaticFiles(directory=settings.GENERATED_MODELS_DIR), name="generated_models_static")
     app.mount("/static/fbupload", StaticFiles(directory=settings.FB_UPLOAD_DIR), name="fbupload_static")
 
+    app.mount("/presets/maps",StaticFiles(directory=settings.PRESET_MAPS_DIR),name="preset_maps_static")
+    app.mount("/presets/models",StaticFiles(directory=settings.PRESET_MODELS_DIR),name="preset_models_static")
+    app.mount("/static/uploads/models",StaticFiles(directory=settings.UPLOAD_MODELS_DIR),name="upload_models_static")
+
 
 
     # Routers

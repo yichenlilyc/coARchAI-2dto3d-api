@@ -2,88 +2,206 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+import shutil
 from pathlib import Path
-from typing import Literal
+from datetime import datetime
+from typing import List, Optional
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from starlette.status import HTTP_400_BAD_REQUEST
 
 from app import settings
-from app.services.storage import safe_join
 
 router = APIRouter()
 
 
-def _assert_ext(filename: str, allowed: set[str]):
+def _validate_extension(filename: str) -> str:
     ext = Path(filename).suffix.lower()
-    if ext not in allowed:
-        raise HTTPException(HTTP_400_BAD_REQUEST, f"Unsupported file extension: {ext}")
-    return ext
+
+    if ext in settings.ALLOWED_PRESET_2D_EXTS:
+        return "2d"
+
+    if ext in settings.ALLOWED_PRESET_3D_EXTS:
+        return "3d"
+
+    raise HTTPException(
+        HTTP_400_BAD_REQUEST,
+        f"Unsupported file extension: {ext}"
+    )
 
 
-def _list_dir(dir_path: str):
-    items = []
-    for name in os.listdir(dir_path):
-        if name.startswith("."):
-            continue
-        p = os.path.join(dir_path, name)
-        if not os.path.isfile(p):
-            continue
-        st = os.stat(p)
-        items.append(
-            {
-                "name": name,
-                "size": st.st_size,
-                "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(),
-            }
-        )
-    items.sort(key=lambda x: x["mtime"], reverse=True)
-    return items
+# ============================================================
+# POST /presets/maps
+# ============================================================
+@router.post("/presets/maps")
+async def upload_preset_map(
+    location: str = Form(...),
+    files: List[UploadFile] = File(...)
+):
+    """
+    Upload one or multiple files for a location.
+    Files can be 2D images OR 3D (.glb, .obj).
+    """
 
+    location = location.strip()
+    if not location:
+        raise HTTPException(HTTP_400_BAD_REQUEST, "Location name required")
 
-async def _save_upload(file: UploadFile, dest_dir: str):
+    location_dir = Path(settings.PRESET_MAPS_DIR) / location
+    location_dir.mkdir(parents=True, exist_ok=True)
+
+    saved = []
+
     import shutil
 
-    if not file.filename:
-        raise HTTPException(HTTP_400_BAD_REQUEST, "Missing filename")
+    for file in files:
+        if not file.filename:
+            continue
 
-    _assert_ext(file.filename, settings.ALLOWED_MODEL_EXTS)
+        _validate_extension(file.filename)
 
-    # keep original name for developer presets (overwrite allowed)
-    out_path = safe_join(dest_dir, Path(file.filename).name)
+        dest = location_dir / Path(file.filename).name
 
-    with open(out_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(file.file, f)
 
-    return Path(out_path).name
+        saved.append(dest.name)
 
-
-# -----------------------
-# Preset Maps
-# -----------------------
-
-@router.post("/presets/maps")
-async def upload_preset_map(file: UploadFile = File(...)):
-    name = await _save_upload(file, settings.PRESET_MAPS_DIR)
-    return {"ok": True, "name": name}
+    return {
+        "ok": True,
+        "location": location,
+        "saved": saved
+    }
 
 
+# ============================================================
+# GET /presets/maps
+# ============================================================
 @router.get("/presets/maps")
-def list_preset_maps():
-    return {"count": len(os.listdir(settings.PRESET_MAPS_DIR)), "items": _list_dir(settings.PRESET_MAPS_DIR)}
+def list_presets():
+    """
+    Returns all locations and their files.
+    """
 
+    base = Path(settings.PRESET_MAPS_DIR)
 
-# -----------------------
-# Preset Models
-# -----------------------
+    locations = []
+
+    if not base.exists():
+        return {"count": 0, "items": []}
+
+    for loc_dir in base.iterdir():
+        if not loc_dir.is_dir():
+            continue
+
+        files = []
+
+        for f in loc_dir.iterdir():
+            if not f.is_file():
+                continue
+
+            ext = f.suffix.lower()
+
+            if ext not in (
+                settings.ALLOWED_PRESET_2D_EXTS |
+                settings.ALLOWED_PRESET_3D_EXTS
+            ):
+                continue
+
+            files.append({
+                "name": f.name,
+                "url": f"/presets/maps/{loc_dir.name}/{f.name}",
+                "size": f.stat().st_size,
+                "mtime": datetime.fromtimestamp(
+                    f.stat().st_mtime
+                ).isoformat()
+            })
+
+        files.sort(key=lambda x: x["mtime"], reverse=True)
+
+        locations.append({
+            "location": loc_dir.name,
+            "files": files
+        })
+
+    locations.sort(key=lambda x: x["location"])
+
+    return {
+        "count": len(locations),
+        "items": locations
+    }
 
 @router.post("/presets/models")
-async def upload_preset_model(file: UploadFile = File(...)):
-    name = await _save_upload(file, settings.PRESET_MODELS_DIR)
-    return {"ok": True, "name": name}
+async def upload_preset_models(
+    folder: Optional[str] = Form(None),
+    files: List[UploadFile] = File(...)
+):
+    """
+    Upload one or multiple primitive models into PRESET_MODELS_DIR.
+    Allowed: .glb, .obj
+
+    If folder is provided:
+        /presets/models/<folder>/<filename>
+    else:
+        /presets/models/<filename>
+    """
+    subdir = (folder or "").strip()
+    base_dir = Path(settings.PRESET_MODELS_DIR)
+
+    target_dir = (base_dir / subdir) if subdir else base_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    saved = []
+    for file in files:
+        if not file.filename:
+            continue
+
+        ext = Path(file.filename).suffix.lower()
+        if ext not in settings.ALLOWED_MODEL_EXTS:
+            raise HTTPException(HTTP_400_BAD_REQUEST, f"Unsupported model extension: {ext}")
+
+        dest = target_dir / Path(file.filename).name
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(file.file, f)
+
+        saved.append(str(dest.relative_to(base_dir)).replace("\\", "/"))
+
+    return {
+        "ok": True, 
+        "saved": saved, 
+        "base": "/presets/models"
+    }
 
 
 @router.get("/presets/models")
 def list_preset_models():
-    return {"count": len(os.listdir(settings.PRESET_MODELS_DIR)), "items": _list_dir(settings.PRESET_MODELS_DIR)}
+    """
+    List primitive models under PRESET_MODELS_DIR (recursive).
+    Returns URLs that match the StaticFiles mount: /presets/models/<path>
+    """
+    base_dir = Path(settings.PRESET_MODELS_DIR)
+    if not base_dir.exists():
+        return {"count": 0, "items": []}
+
+    items = []
+    for p in base_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        ext = p.suffix.lower()
+        if ext not in settings.ALLOWED_MODEL_EXTS:
+            continue
+
+        rel = str(p.relative_to(base_dir)).replace("\\", "/")
+        items.append({
+            "name": p.name,
+            "path": rel,
+            "url": f"/presets/models/{rel}",
+            "size": p.stat().st_size,
+            "mtime": datetime.fromtimestamp(p.stat().st_mtime).isoformat(),
+        })
+
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return {
+        "count": len(items), 
+        "items": items
+    }
