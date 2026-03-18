@@ -1,59 +1,84 @@
 # ---- GPU build (CUDA 12.8 + PyTorch 2.8.0 cu128) ----
-FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
+FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 # You can override this at build time: --build-arg CUDA_ARCH_LIST="70;75;80;86;89;90"
 # (Default covers Turing 20xx, Ampere 30xx, Ada 40xx, Hopper 90)
 # at the top (or before you set ENV)
+ENV PATH="/root/miniconda3/bin:${PATH}"
+ENV CUDA_HOME="/usr/local/cuda"
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+
+
 ARG CUDA_ARCH_LIST="90;89;86;80;75"
 ARG TORCH_CUDA_ARCH_DOT="9.0;8.9;8.6;8.0;7.5"
 
-# Basic OS deps (compiler, cmake, ninja for torchmcubes; ffmpeg/opengl bits for image/mesh ops)
+# System Prereqs
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-venv python3.11-dev python3-pip \
-    build-essential git cmake ninja-build pkg-config \
-    ffmpeg libgl1 libglib2.0-0 curl ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+    wget curl git build-essential ninja-build ffmpeg libgl1-mesa-glx libglib2.0-0 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-# Make `python` point to 3.11
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
- && python -m pip install -U pip
+RUN wget -qO Miniforge3.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh" \
+    && bash Miniforge3.sh -b -p /root/miniconda3 \
+    && rm Miniforge3.sh
+
+# Environment setup for Main API
+RUN conda install -y python=3.11
+
+# Pytorch for base environment
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+RUN pip install --no-cache-dir "scikit-build-core>=0.11.6" cmake ninja "pybind11[global]>=2.11"
+
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch==2.8.0+cu128
 
 WORKDIR /app
 
-# Copy only the dependency list first to leverage Docker layer caching
-COPY requirements.txt ./requirements.txt
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 1) Install the correct GPU PyTorch wheel first
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 \
-    torch==2.8.0+cu128
+# Setup for SAM 2 
+WORKDIR /app/external
+RUN git clone https://github.com/facebookresearch/sam2.git
+WORKDIR /app/external/sam2
+RUN pip install -e .
 
-# 2) Tell PyTorch/CMake which GPU architectures to compile native extensions for
-ENV CMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH_LIST}"
-ENV TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_DOT}"
-# Optional: speed up some source builds
-ENV MAX_JOBS=8
+# Setup for SAM 3D
+WORKDIR /app/external
+RUN git clone https://github.com/facebookresearch/sam-3d-objects.git
+WORKDIR /app/external/sam-3d-objects
 
-# Build tools needed by torchmcubes
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
- && pip install --no-cache-dir "scikit-build-core>=0.11.6" cmake ninja "pybind11[global]>=2.11"
+# Conda env
+RUN conda env create -f environments/default.yml
 
+# activate the env for next steops
+SHELL ["conda", "run", "-n", "sam3d-objects", "/bin/bash", "-c"]
 
-# 3) Install the rest (includes torchmcubes from source)
-RUN pip install --no-cache-dir --no-build-isolation -r requirements.txt
+ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX"
+ENV FORCE_CUDA="1"
+ENV PIP_EXTRA_INDEX_URL="https://pypi.ngc.nvidia.com https://download.pytorch.org/whl/cu121"
+ENV PIP_FIND_LINKS="https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.1_cu121.html"
 
-# Copy the whole repo (after deps to keep cache effective)
-COPY . /app
+RUN pip install hatchling hatch-requirements-txt editables packaging setuptools wheel cython psutil ninja bpy
+RUN pip install --no-build-isolation -e '.[dev]'
+RUN pip install --no-build-isolation -e '.[p3d]'
+RUN pip install --no-build-isolation -e '.[inference]'
 
-# TripoSR model location (adjust if you use a different path)
-# Expected files: /app/external/TripoSR/models/triposr/config.yaml and model.ckpt
-ENV TRIPOSR_MODEL_DIR=/app/external/TripoSR/models/triposr
-ENV TRIPOSR_CONFIG=config.yaml
-ENV TRIPOSR_WEIGHTS=model.ckpt
+# Add server deps to the isolated worker
+RUN pip install fastapi uvicorn python-multipart pydantic
 
-# Prefer CUDA
-ENV USE_CUDA=1
+# fix bugs with SAM models
+RUN chmod +x ./patching/hydra && ./patching/hydra
+RUN sed -i 's/if mask_points.isfinite().max() == 0:/if mask_points.numel() == 0 or mask_points.isfinite().max() == 0:/g' /app/external/sam-3d-objects/sam3d_objects/data/dataset/tdfy/img_and_mask_transforms.py
+RUN sed -i 's/self.rendering_engine = .*/self.rendering_engine = "nvdiffrast"/g' /app/external/sam-3d-objects/sam3d_objects/pipeline/inference_pipeline.py
 
-EXPOSE 8000
-# Use explicit module path to avoid cwd confusion
-CMD ["uvicorn", "scripts.server:app", "--host", "0.0.0.0", "--port", "8000"]
+# reset shell back to default for the server
+SHELL ["/bin/bash", "-c"]
+
+# Final download of models
+WORKDIR /app
+COPY scripts/download_models.py ./scripts/download_models.py
+
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
+
+RUN python scripts/download_models.py
