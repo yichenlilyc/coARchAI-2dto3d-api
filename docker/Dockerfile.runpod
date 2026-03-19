@@ -80,9 +80,9 @@ RUN python scripts/download_models.py
 # Runpod Deployment Setup 
 
 # Install Cloudflare Tunnel
-RUN curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null && \
-    echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared bullseye main' | tee /etc/apt/sources.list.d/cloudflared.list && \
-    apt-get update && apt-get install -y cloudflared
+RUN curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb && \
+    dpkg -i cloudflared.deb && \
+    rm cloudflared.deb
 
 # Bake in Static Environment Variables
 ENV GENERATED_IMAGES_DIR=/app/generated/images
