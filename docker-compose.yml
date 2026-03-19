@@ -2,7 +2,8 @@ version: "3.9"
 
 services:
   # GPU 0 : Main API app
-  api-main: 
+  api-main:
+    image:  nmpowers/sam-3d-api:latest
     build: 
       context: .
       dockerfile: docker/Dockerfile.gpu
@@ -60,6 +61,7 @@ services:
 
   # GPU 1 : SAM 3D worker API
   sam-worker: 
+    image:  nmpowers/sam-3d-api:latest
     build:
       context: .
       dockerfile: docker/Dockerfile.gpu
