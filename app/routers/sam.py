@@ -19,6 +19,7 @@ import torch
 from app import settings
 from app.services.common import load_image_from_payload, decode_data_url_to_bytes
 from app.services.errors import json_error
+from app.services.firebase_storage import save_model_to_firebase
 
 router = APIRouter()
 
@@ -145,11 +146,9 @@ async def generate_3d_sam(payload: dict = Body(...)):
         return json_error("Failed to queue SAM 3D generation", stage="sam-generate", exc=e)
 
 
-# ==========================================
-# 3. Poll Status & Serve File
-# ==========================================
+# Poll Status & Serve File
 @router.get("/image-to-3d/sam/status/{task_id}")
-async def check_sam_status(task_id: str, format: str = "glb"):
+async def check_sam_status(task_id: str, format: str = "glb", user_id: str = "anonymous_student"):
     if format not in ["glb", "ply"]:
         return json_error("Invalid format. Use 'glb' or 'ply'.", stage="sam-status")
     
@@ -162,15 +161,36 @@ async def check_sam_status(task_id: str, format: str = "glb"):
             data = json.load(f)
         
         if data.get("status") == "completed":
-            # Read the absolute path injected by the Worker API
             target_file = data.get(f"{format}_file") 
             
             if target_file and os.path.exists(target_file):
-                return FileResponse(
-                    target_file, 
-                    media_type="application/octet-stream",
-                    filename=f"{task_id}.{format}"
-                )
+                # Check if we already uploaded it
+                firebase_key = f"firebase_{format}_url"
+                
+                if firebase_key not in data:
+                    # Read the local mesh file
+                    with open(target_file, "rb") as mesh_file:
+                        file_bytes = mesh_file.read()
+                    
+                    # Upload to Firebase and get the public URL
+                    firebase_record = save_model_to_firebase(
+                        glb_bytes=file_bytes, 
+                        user_id=user_id, 
+                        source_image_id=data.get("source_image_id", "unknown"),
+                        format=format
+                    )
+                    
+                    # Save the new Firebase URL into the local so we don't upload it twice
+                    data[firebase_key] = firebase_record["glb_url"]
+                    with open(status_file, "w") as f:
+                        json.dump(data, f)
+                
+                # Instead of saving the heavy file locally, redirect the user to download it from firebase
+                return JSONResponse(content={
+                    "status": "completed", 
+                    "format": format,
+                    "download_url": data[firebase_key]
+                })
 
             return JSONResponse(content={"status": "error", "error": f"{format.upper()} file missing on server."})
             
