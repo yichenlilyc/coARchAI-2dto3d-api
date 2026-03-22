@@ -2,6 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+import os
 
 from app import settings
 from app.routers.health import router as health_router
@@ -14,7 +15,20 @@ from app.routers.sam import router as sam_router
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="2D→3D Service (Shap-E + Tripo)")
+    server_configs = []
+
+    # Check if the environment variable is set already, if so use it
+    public_url = os.environ.get("PUBLIC_BASE_URL")
+    if public_url:
+        server_configs.append({"url": public_url, "description": "Public Cloudflare Tunnel"})
+
+    # Pass the metadata and dynamic server list to FastAPI
+    app = FastAPI(
+        title="CoARchAI 2D-to-3D API",
+        description="Image to 3D Generation API (Shap-E, Tripo, Meta SAM)",
+        version="0.1.0",
+        servers=server_configs
+    )
 
     app.add_middleware(
         CORSMiddleware,
