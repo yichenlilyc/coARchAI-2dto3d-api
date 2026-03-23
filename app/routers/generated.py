@@ -157,7 +157,7 @@ def delete_model(
     model_id: str, 
     user_id: str = Query(..., description="The ID of the user requesting deletion")
 ):
-    """Deletes the 3D model from Firebase Storage and removes its Firestore record."""
+    """Deletes both the 3D mesh (.glb) and splat (.ply) from Firebase Storage and removes its Firestore record."""
     db, bucket = get_db(), get_bucket()
     if not db or not bucket:
         raise HTTPException(status_code=500, detail="Firebase not connected.")
@@ -173,17 +173,20 @@ def delete_model(
     if data.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Unauthorized to delete this model.")
 
-    # Reconstruct the file path and delete from Storage
-    file_path = f"models/{user_id}/{model_id}.glb"
+    # Reconstruct the file paths and delete BOTH from Storage
+    formats_to_delete = ["glb", "ply"]
     
-    try:
-        blob = bucket.blob(file_path)
-        if blob.exists():
-            blob.delete()
-    except Exception as e:
-        print(f"Warning: Could not delete storage blob {file_path}: {e}")
+    for fmt in formats_to_delete:
+        file_path = f"models/{user_id}/{model_id}.{fmt}"
+        try:
+            blob = bucket.blob(file_path)
+            if blob.exists():
+                blob.delete()
+                print(f"Successfully deleted: {file_path}")
+        except Exception as e:
+            print(f"Warning: Could not delete storage blob {file_path}: {e}")
 
-    # Delete the record from Firestore
+    # Delete the single combined record from Firestore
     doc_ref.delete()
 
-    return {"status": "success", "deleted_model_id": model_id}
+    return {"status": "success", "deleted_model_id": model_id, "formats_cleaned": formats_to_delete}

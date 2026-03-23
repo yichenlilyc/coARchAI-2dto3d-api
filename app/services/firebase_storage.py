@@ -29,7 +29,7 @@ def save_model_to_firebase(file_bytes: bytes, user_id: str, model_id: str, sourc
         "user_id": user_id,
         "source_image_id": source_image_id,
         f"{format}_url": public_url, # Dynamically saves as 'glb_url' OR 'ply_url'
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "created_at": datetime.utcnow().isoformat() + "Z",
         "status": "completed",
     }
     
