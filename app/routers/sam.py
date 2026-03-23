@@ -15,7 +15,7 @@ from PIL import Image
 import numpy as np
 import torch
 
-# --- IMPORT APP SERVICES ---
+# Import App Sevices
 from app import settings
 from app.services.common import load_image_from_payload, decode_data_url_to_bytes
 from app.services.errors import json_error
@@ -23,7 +23,7 @@ from app.services.firebase_storage import save_model_to_firebase
 
 router = APIRouter()
 
-# --- LAZY LOAD SAM 2 ---
+# Lazy Load SAM 2
 sam2_model = None
 SAM2_LOAD_ERROR: Optional[str] = None
 
@@ -100,7 +100,7 @@ async def segment_image(payload: dict = Body(...)):
         return json_error(str(e), stage="sam-segment", exc=e)
 
 
-# 2. Start 3D Generation (SAM 3D Worker)
+# Start 3D Generation (SAM 3D Worker)
 @router.post("/image-to-3d/sam/generate")
 async def generate_3d_sam(payload: dict = Body(...)):
     task_id = str(uuid.uuid4())
@@ -174,14 +174,15 @@ async def check_sam_status(task_id: str, format: str = "glb", user_id: str = "an
                     
                     # Upload to Firebase and get the public URL
                     firebase_record = save_model_to_firebase(
-                        glb_bytes=file_bytes, 
+                        file_bytes=file_bytes, 
                         user_id=user_id, 
+                        model_id=task_id,
                         source_image_id=data.get("source_image_id", "unknown"),
                         format=format
                     )
                     
                     # Save the new Firebase URL into the local so we don't upload it twice
-                    data[firebase_key] = firebase_record["glb_url"]
+                    data[firebase_key] = firebase_record[f"{format}_url"]
                     with open(status_file, "w") as f:
                         json.dump(data, f)
                 

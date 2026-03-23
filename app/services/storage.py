@@ -21,7 +21,7 @@ def safe_join(root_dir: str, filename: str) -> Path:
     root = Path(root_dir).resolve()
     p = (root / filename).resolve()
 
-    # Robust traversal check (use Path semantics, not string prefix)
+    # traversal check (use Path semantics, not string prefix)
     try:
         p.relative_to(root)
     except ValueError:
