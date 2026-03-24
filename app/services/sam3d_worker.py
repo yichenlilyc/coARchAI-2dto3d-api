@@ -10,7 +10,7 @@ from fastapi import FastAPI, BackgroundTasks
 import torch
 from pydantic import BaseModel
 
-# --- IMPORT SETTINGS FROM MAIN APP ---
+# Import settings from main app
 from app import settings
 
 class TaskPayload(BaseModel):
@@ -97,7 +97,6 @@ def run_3d_generation(task_id: str, img_path: str, mask_path: str):
 
         print(f"Running 3D generation for task {task_id}...")
         
-        # --- STATE MUTATION FIX ---
         # Force the pipeline to generate meshes even if previous runs set it to False
         for obj in [pipeline, getattr(pipeline, 'pipeline', None), getattr(pipeline, 'model', None)]:
             if obj is not None:
@@ -106,7 +105,7 @@ def run_3d_generation(task_id: str, img_path: str, mask_path: str):
 
         output = pipeline(img_rgb, mask, seed=42)
 
-        # --- GALLERY INTEGRATION ---
+        # gallery info
         ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         uid = uuid.uuid4().hex[:12]
         base_name = f"{ts}_SAM-3D_{uid}"
@@ -142,7 +141,7 @@ def run_3d_generation(task_id: str, img_path: str, mask_path: str):
 
         print(f"Task {task_id} completed. Saved as {glb_name} in Gallery.")
         
-        # Give the Main API the exact paths to serve
+        # Give the main API the exact paths to serve
         update_ticket(task_id, "completed", glb_file=glb_path, ply_file=ply_path)
 
     except Exception as e:
