@@ -22,7 +22,7 @@ from app.services.errors import json_error
 from app.services.firebase_storage import save_model_to_firebase
 
 router = APIRouter()
-
+# --- SAM 2 ---
 # Lazy Load SAM 2
 sam2_model = None
 SAM2_LOAD_ERROR: Optional[str] = None
@@ -98,6 +98,88 @@ async def segment_image(payload: dict = Body(...)):
         
     except Exception as e:
         return json_error(str(e), stage="sam-segment", exc=e)
+    
+# --- SAM 3 ---
+# Lazy Load SAM 3
+sam3_model = None
+sam3_processor = None
+SAM3_LOAD_ERROR: Optional[str] = None
+
+def get_sam3():
+    """Lazy-load SAM 3 once for text-based prompt segmentation."""
+    global sam3_model, sam3_processor, SAM3_LOAD_ERROR
+    if sam3_model is not None and sam3_processor is not None:
+        return sam3_model, sam3_processor
+    
+    try:
+        from transformers import Sam3Processor, Sam3Model
+        
+        # SAM 3 requires a HuggingFace login/token to access 'facebook/sam3'
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        sam3_model = Sam3Model.from_pretrained("facebook/sam3").to(device)
+        sam3_processor = Sam3Processor.from_pretrained("facebook/sam3")
+        SAM3_LOAD_ERROR = None
+        return sam3_model, sam3_processor
+    except Exception as e:
+        SAM3_LOAD_ERROR = str(e)
+        return None, None
+
+def run_inference_sam3_sync(img_rgb, text_prompt):
+    """Blocking GPU Inference for SAM 3 Text Prompts."""
+    model, processor = get_sam3()
+    if not model:
+        raise RuntimeError(f"SAM 3 not loaded: {SAM3_LOAD_ERROR}")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Process text and image directly through the SAM 3 Processor
+    inputs = processor(images=img_rgb, text=text_prompt, return_tensors="pt").to(device)
+    
+    with torch.no_grad():
+        outputs = model(**inputs)
+        
+    results = processor.post_process_instance_segmentation(
+        outputs,
+        threshold=0.5,
+        mask_threshold=0.5,
+        target_sizes=inputs.get("original_sizes").tolist()
+    )[0]
+    
+    masks = results["masks"]
+    if len(masks) == 0:
+        raise ValueError(f"No objects found matching the prompt: '{text_prompt}'")
+        
+    # If the text prompt matches multiple objects (e.g., "windows"), combine them into one mask
+    combined_mask = torch.sum(masks, dim=0).clamp(0, 1)
+    mask_uint8 = (combined_mask * 255).cpu().numpy().astype(np.uint8)
+    
+    return Image.fromarray(mask_uint8, mode='L')
+
+# SAM 3 Text Prompt Segmentation
+@router.post("/image-to-3d/sam3/segment-prompt")
+async def segment_image_prompt_sam3(payload: dict = Body(...)):
+    """Accepts a base64 image and a 'prompt' string. Returns a combined segmentation mask."""
+    try:
+        if "image_b64" in payload and "b64" not in payload:
+            payload["b64"] = payload["image_b64"]
+            
+        img = load_image_from_payload(payload)
+        prompt = payload.get("prompt")
+        
+        if not prompt:
+            return json_error("Missing 'prompt' text in payload", stage="sam3-segment")
+
+        loop = asyncio.get_event_loop()
+        mask_img = await loop.run_in_executor(None, run_inference_sam3_sync, img, prompt)
+        
+        buf = io.BytesIO()
+        mask_img.save(buf, format="PNG")
+        mask_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        
+        return JSONResponse(content={"status": "success", "mask_b64": mask_b64})
+        
+    except Exception as e:
+        return json_error(str(e), stage="sam3-segment", exc=e)
 
 
 # Start 3D Generation (SAM 3D Worker)
