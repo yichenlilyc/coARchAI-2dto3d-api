@@ -152,6 +152,9 @@ def run_inference_sam3_sync(img_pil, text_prompt):
     else:
         combined_mask = np.clip(np.sum(masks, axis=0), 0, 1)
         mask_uint8 = (combined_mask * 255).astype(np.uint8)
+
+    if mask_uint8.ndim > 2:
+        mask_uint8 = np.squeeze(mask_uint8)
     
     return Image.fromarray(mask_uint8, mode='L')
 

@@ -24,12 +24,12 @@ RUN conda install -y python=3.12
 # Pytorch for base environment
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir "scikit-build-core>=0.11.6" cmake ninja "pybind11[global]>=2.11"
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch==2.8.0+cu128
+RUN pip install --no-cache-dir torch==2.7.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt pycocotools
 # Install HuggingFace libraries for SAM 3 processing
 RUN pip install --no-cache-dir transformers accelerate
 
@@ -75,7 +75,7 @@ RUN python scripts/download_models.py
 RUN curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb && \
     dpkg -i cloudflared.deb && \
     rm cloudflared.deb
-    
+
 ENV GENERATED_IMAGES_DIR=/app/generated/images
 ENV GENERATED_MODELS_DIR=/app/generated/models
 ENV FB_UPLOAD_DIR=/app/fbupload
