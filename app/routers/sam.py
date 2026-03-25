@@ -22,83 +22,6 @@ from app.services.errors import json_error
 from app.services.firebase_storage import save_model_to_firebase
 
 router = APIRouter()
-# --- SAM 2 ---
-# Lazy Load SAM 2
-sam2_model = None
-SAM2_LOAD_ERROR: Optional[str] = None
-
-def get_sam2_predictor():
-    """Lazy-load SAM 2 once, reuse across requests."""
-    global sam2_model, SAM2_LOAD_ERROR
-    if sam2_model is not None:
-        from sam2.sam2_image_predictor import SAM2ImagePredictor
-        return SAM2ImagePredictor(sam2_model)
-    
-    try:
-        from sam2.build_sam import build_sam2
-        from sam2.sam2_image_predictor import SAM2ImagePredictor
-        
-        CHECKPOINT_PATH = "/app/checkpoints/sam2.1_hiera_large.pt"
-        CONFIG_PATH = "configs/sam2.1/sam2.1_hiera_l.yaml"
-        
-        if not os.path.exists(CHECKPOINT_PATH):
-            raise FileNotFoundError(f"Missing SAM 2 checkpoint at {CHECKPOINT_PATH}")
-            
-        sam2_model = build_sam2(CONFIG_PATH, CHECKPOINT_PATH, device=settings.DEVICE)
-        SAM2_LOAD_ERROR = None
-        return SAM2ImagePredictor(sam2_model)
-    except Exception as e:
-        SAM2_LOAD_ERROR = str(e)
-        return None
-
-def run_inference_sync(img_rgb, x, y):
-    """Blocking GPU Inference for SAM 2."""
-    predictor = get_sam2_predictor()
-    if not predictor:
-        raise RuntimeError(f"SAM 2 not loaded: {SAM2_LOAD_ERROR}")
-
-    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-        img_np = np.array(img_rgb)
-        predictor.set_image(img_np)
-        
-        masks, scores, logits = predictor.predict(
-            point_coords=np.array([[x, y]]),
-            point_labels=np.array([1]), 
-            multimask_output=True
-        )
-    
-    # Grab the highest confidence mask
-    best_mask = masks[np.argmax(scores)]
-    mask_uint8 = (best_mask * 255).astype(np.uint8)
-    return Image.fromarray(mask_uint8, mode='L')
-
-
-# 2D Segmentation (SAM 2)
-@router.post("/image-to-3d/sam/segment")
-async def segment_image(payload: dict = Body(...)):
-    try:
-        # Map frontend 'image_b64' to standard 'b64' for common.py compatibility
-        if "image_b64" in payload and "b64" not in payload:
-            payload["b64"] = payload["image_b64"]
-            
-        img = load_image_from_payload(payload)
-        x, y = payload.get("x"), payload.get("y")
-        
-        if x is None or y is None:
-            return json_error("Missing x or y coordinates in payload", stage="sam-segment")
-
-        loop = asyncio.get_event_loop()
-        mask_img = await loop.run_in_executor(None, run_inference_sync, img, x, y)
-        
-        buf = io.BytesIO()
-        mask_img.save(buf, format="PNG")
-        mask_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-        
-        return JSONResponse(content={"status": "success", "mask_b64": mask_b64})
-        
-    except Exception as e:
-        return json_error(str(e), stage="sam-segment", exc=e)
-    
 # --- SAM 3 ---
 # Lazy Load SAM 3
 sam3_model = None
@@ -106,17 +29,16 @@ sam3_processor = None
 SAM3_LOAD_ERROR: Optional[str] = None
 
 def get_sam3():
-    """Lazy-load Meta's official SAM 3 model."""
+    """Lazy-load Meta's official SAM 3 model for both prompts and clicks."""
     global sam3_model, sam3_processor, SAM3_LOAD_ERROR
     if sam3_model is not None and sam3_processor is not None:
         return sam3_model, sam3_processor
     
     try:
-        # Import directly from the Meta SAM 3 repository you cloned
         from sam3.model_builder import build_sam3_image_model
         from sam3.model.sam3_image_processor import Sam3Processor
         
-        print("Initializing native SAM 3 Model...")
+        print("Initializing native SAM 3 Model for Prompts and Clicks...")
         sam3_model = build_sam3_image_model()
         sam3_processor = Sam3Processor(sam3_model)
         
@@ -126,54 +48,67 @@ def get_sam3():
         SAM3_LOAD_ERROR = str(e)
         return None, None
 
-
-def run_inference_sam3_sync(img_pil, text_prompt):
-    """Blocking GPU Inference using Meta's SAM 3 API."""
-    model, processor = get_sam3()
-    if not model:
-        raise RuntimeError(f"SAM 3 not loaded: {SAM3_LOAD_ERROR}")
-
-    with torch.no_grad():
-        # 1. Load the image into the processor's state
-        inference_state = processor.set_image(img_pil)
-        
-        # 2. Fire the text prompt
-        output = processor.set_text_prompt(state=inference_state, prompt=text_prompt)
-        
-    masks = output["masks"]
-    
+def process_sam3_masks(masks):
+    """Helper function to safely flatten and combine SAM 3 masks for PIL."""
     if len(masks) == 0:
-        raise ValueError(f"No objects found matching the prompt: '{text_prompt}'")
+        raise ValueError("No objects found matching the input.")
 
-    # 3. Combine multiple instance masks into one single composite mask
     if isinstance(masks, torch.Tensor):
         combined_mask = torch.sum(masks, dim=0).clamp(0, 1)
         mask_uint8 = (combined_mask * 255).cpu().numpy().astype(np.uint8)
     else:
         combined_mask = np.clip(np.sum(masks, axis=0), 0, 1)
         mask_uint8 = (combined_mask * 255).astype(np.uint8)
-
-    if mask_uint8.ndim > 2:
-        mask_uint8 = np.squeeze(mask_uint8)
     
+    if mask_uint8.ndim > 2:
+        mask_uint8 = np.squeeze(mask_uint8) 
+        
     return Image.fromarray(mask_uint8, mode='L')
 
-# SAM 3 Text Prompt Segmentation
-@router.post("/image-to-3d/sam3/segment-prompt")
-async def segment_image_prompt_sam3(payload: dict = Body(...)):
-    """Accepts a base64 image and a 'prompt' string. Returns a combined segmentation mask."""
+def run_inference_sam3_prompt_sync(img_pil, text_prompt):
+    """Blocking GPU Inference for Text Prompts."""
+    model, processor = get_sam3()
+    if not model: raise RuntimeError(f"SAM 3 not loaded: {SAM3_LOAD_ERROR}")
+
+    with torch.no_grad():
+        inference_state = processor.set_image(img_pil)
+        output = processor.set_text_prompt(state=inference_state, prompt=text_prompt)
+        
+    return process_sam3_masks(output["masks"])
+
+def run_inference_sam3_point_sync(img_pil, x, y):
+    """Blocking GPU Inference for Touch/Click Coordinates."""
+    model, processor = get_sam3()
+    if not model: raise RuntimeError(f"SAM 3 not loaded: {SAM3_LOAD_ERROR}")
+
+    with torch.no_grad():
+        inference_state = processor.set_image(img_pil)
+        # Pass the (x, y) coordinate as a positive point prompt (label 1)
+        output = processor.set_point_prompt(
+            state=inference_state, 
+            point_coords=[[x, y]], 
+            point_labels=[1]
+        )
+        
+    return process_sam3_masks(output["masks"])
+
+# Router Endpoints
+
+@router.post("/image-to-3d/sam/segment-touch")
+async def segment_image_point(payload: dict = Body(...)):
+    """Handles Touch-to-Mask clicks using SAM 3."""
     try:
         if "image_b64" in payload and "b64" not in payload:
             payload["b64"] = payload["image_b64"]
             
         img = load_image_from_payload(payload)
-        prompt = payload.get("prompt")
+        x, y = payload.get("x"), payload.get("y")
         
-        if not prompt:
-            return json_error("Missing 'prompt' text in payload", stage="sam3-segment")
+        if x is None or y is None:
+            return json_error("Missing x or y coordinates", stage="sam3-point")
 
         loop = asyncio.get_event_loop()
-        mask_img = await loop.run_in_executor(None, run_inference_sam3_sync, img, prompt)
+        mask_img = await loop.run_in_executor(None, run_inference_sam3_point_sync, img, x, y)
         
         buf = io.BytesIO()
         mask_img.save(buf, format="PNG")
@@ -182,7 +117,32 @@ async def segment_image_prompt_sam3(payload: dict = Body(...)):
         return JSONResponse(content={"status": "success", "mask_b64": mask_b64})
         
     except Exception as e:
-        return json_error(str(e), stage="sam3-segment", exc=e)
+        return json_error(str(e), stage="sam3-point", exc=e)
+
+@router.post("/image-to-3d/segment-prompt")
+async def segment_image_prompt(payload: dict = Body(...)):
+    """Handles Text Prompts using SAM 3."""
+    try:
+        if "image_b64" in payload and "b64" not in payload:
+            payload["b64"] = payload["image_b64"]
+            
+        img = load_image_from_payload(payload)
+        prompt = payload.get("prompt")
+        
+        if not prompt:
+            return json_error("Missing 'prompt' text in payload", stage="sam3-prompt")
+
+        loop = asyncio.get_event_loop()
+        mask_img = await loop.run_in_executor(None, run_inference_sam3_prompt_sync, img, prompt)
+        
+        buf = io.BytesIO()
+        mask_img.save(buf, format="PNG")
+        mask_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        
+        return JSONResponse(content={"status": "success", "mask_b64": mask_b64})
+        
+    except Exception as e:
+        return json_error(str(e), stage="sam3-prompt", exc=e)
 
 
 # Start 3D Generation (SAM 3D Worker)
