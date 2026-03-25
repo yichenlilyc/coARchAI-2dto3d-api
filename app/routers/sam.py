@@ -106,52 +106,52 @@ sam3_processor = None
 SAM3_LOAD_ERROR: Optional[str] = None
 
 def get_sam3():
-    """Lazy-load SAM 3 once for text-based prompt segmentation."""
+    """Lazy-load Meta's official SAM 3 model."""
     global sam3_model, sam3_processor, SAM3_LOAD_ERROR
     if sam3_model is not None and sam3_processor is not None:
         return sam3_model, sam3_processor
     
     try:
-        from transformers import Sam3Processor, Sam3Model
+        # Import directly from the Meta SAM 3 repository you cloned
+        from sam3.model_builder import build_sam3_image_model
+        from sam3.model.sam3_image_processor import Sam3Processor
         
-        # SAM 3 requires a HuggingFace login/token to access 'facebook/sam3'
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        sam3_model = Sam3Model.from_pretrained("facebook/sam3").to(device)
-        sam3_processor = Sam3Processor.from_pretrained("facebook/sam3")
+        print("Initializing native SAM 3 Model...")
+        sam3_model = build_sam3_image_model()
+        sam3_processor = Sam3Processor(sam3_model)
+        
         SAM3_LOAD_ERROR = None
         return sam3_model, sam3_processor
     except Exception as e:
         SAM3_LOAD_ERROR = str(e)
         return None, None
 
-def run_inference_sam3_sync(img_rgb, text_prompt):
-    """Blocking GPU Inference for SAM 3 Text Prompts."""
+
+def run_inference_sam3_sync(img_pil, text_prompt):
+    """Blocking GPU Inference using Meta's SAM 3 API."""
     model, processor = get_sam3()
     if not model:
         raise RuntimeError(f"SAM 3 not loaded: {SAM3_LOAD_ERROR}")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    
-    # Process text and image directly through the SAM 3 Processor
-    inputs = processor(images=img_rgb, text=text_prompt, return_tensors="pt").to(device)
-    
     with torch.no_grad():
-        outputs = model(**inputs)
+        # 1. Load the image into the processor's state
+        inference_state = processor.set_image(img_pil)
         
-    results = processor.post_process_instance_segmentation(
-        outputs,
-        threshold=0.5,
-        mask_threshold=0.5,
-        target_sizes=inputs.get("original_sizes").tolist()
-    )[0]
+        # 2. Fire the text prompt
+        output = processor.set_text_prompt(state=inference_state, prompt=text_prompt)
+        
+    masks = output["masks"]
     
-    masks = results["masks"]
     if len(masks) == 0:
         raise ValueError(f"No objects found matching the prompt: '{text_prompt}'")
-        
-    # If the text prompt matches multiple objects (e.g., "windows"), combine them into one mask
-    combined_mask = torch.sum(masks, dim=0).clamp(0, 1)
-    mask_uint8 = (combined_mask * 255).cpu().numpy().astype(np.uint8)
+
+    # 3. Combine multiple instance masks into one single composite mask
+    if isinstance(masks, torch.Tensor):
+        combined_mask = torch.sum(masks, dim=0).clamp(0, 1)
+        mask_uint8 = (combined_mask * 255).cpu().numpy().astype(np.uint8)
+    else:
+        combined_mask = np.clip(np.sum(masks, axis=0), 0, 1)
+        mask_uint8 = (combined_mask * 255).astype(np.uint8)
     
     return Image.fromarray(mask_uint8, mode='L')
 
