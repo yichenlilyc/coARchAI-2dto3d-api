@@ -1,4 +1,3 @@
-# app/routers/legacy_image_to_3d.py
 from __future__ import annotations
 
 import os
@@ -13,7 +12,7 @@ from app.services.storage import save_generated_glb
 
 from app.services.shape import get_shape_pipe, shape_load_error
 from app.services.triposr import get_triposr, TRIPOSR_IMPORT_ERROR
-from app.services.tripo3d import tripo3d_from_payload_sync_glb
+from app.services.tripo3d import tripo3d_start_job, tripo3d_get_job
 
 from app.services.errors import json_error
 
@@ -106,13 +105,18 @@ def image_to_3d_triposr(payload: dict = Body(...), seed: Optional[int] = None):
 @router.post("/image-to-3d/tripo3d")
 async def image_to_3d_tripo3d(payload: dict = Body(...)):
     try:
-        glb_bytes, meta = await tripo3d_from_payload_sync_glb(payload)
-        headers = {
-            "Content-Disposition": 'attachment; filename="tripo3d.glb"',
-            "X-Model-URL": meta["url"],
-        }
-        return Response(content=glb_bytes, media_type="model/gltf-binary", headers=headers)
+        return await tripo3d_start_job(payload)
     except HTTPException:
         raise
     except Exception as e:
-        return json_error("Tripo3D inference failed", stage="tripo3d", exc=e)
+        return json_error("Tripo3D start job failed", stage="tripo3d-start", exc=e)
+
+
+@router.get("/image-to-3d/tripo3d/{job_id}")
+def image_to_3d_tripo3d_status(job_id: str):
+    try:
+        return tripo3d_get_job(job_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        return json_error("Tripo3D status failed", stage="tripo3d-status", exc=e)

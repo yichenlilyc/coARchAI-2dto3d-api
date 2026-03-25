@@ -49,3 +49,15 @@ TRIPO3D_POLL_SECONDS = float(os.getenv("TRIPO3D_POLL_SECONDS", "2.0"))
 TRIPO3D_TIMEOUT_SECONDS = float(os.getenv("TRIPO3D_TIMEOUT_SECONDS", "1800"))
 
 ALLOWED_UPLOAD_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+
+# --- OpenAI ---
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-4o-realtime-preview")
+DICTATION_MAX_UPLOAD_MB = int(os.getenv("DICTATION_MAX_UPLOAD_MB", "25"))
+DICTATION_AUDIO_RETENTION = os.getenv("DICTATION_AUDIO_RETENTION", "none")
+DICTATION_DEBUG_DIR = os.getenv("DICTATION_DEBUG_DIR", "/app/dictation")
+
+os.makedirs(DICTATION_DEBUG_DIR, exist_ok=True)
+
+DICTATION_ALLOWED_AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".webm", ".mp4", ".mpeg", ".mpga"}

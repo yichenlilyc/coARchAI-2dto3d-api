@@ -10,6 +10,7 @@ from app.routers.firebase_legacy import router as firebase_legacy_router
 from app.routers.legacy_image_to_3d import router as legacy_image_to_3d_router
 from app.routers.uploads import router as uploads_router
 from app.routers.presets import router as presets_router
+from app.routers.dictation import router as dictation_router
 
 
 def create_app() -> FastAPI:
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
     app.include_router(legacy_image_to_3d_router, tags=["legacy"])
     app.include_router(uploads_router, tags=["uploads"])
     app.include_router(presets_router, tags=["presets"])
+    app.include_router(dictation_router, tags=["dictation"])
 
     return app
 
