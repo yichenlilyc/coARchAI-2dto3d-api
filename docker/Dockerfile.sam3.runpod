@@ -29,7 +29,7 @@ RUN pip install --no-cache-dir torch==2.7.0 torchvision torchaudio --index-url h
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt pycocotools
+RUN pip install --no-cache-dir -r requirements.txt pycocotools "setuptools<82.0.0"
 # Install HuggingFace libraries for SAM 3 processing
 RUN pip install --no-cache-dir transformers accelerate
 
