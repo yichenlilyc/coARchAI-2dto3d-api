@@ -65,16 +65,33 @@ def process_sam3_masks(masks):
         
     return Image.fromarray(mask_uint8, mode='L')
 
-def run_inference_sam3_prompt_sync(img_pil, text_prompt):
-    """Blocking GPU Inference for Text Prompts."""
+def run_inference_sam3_point_sync(img_pil, x, y):
+    """Blocking GPU Inference for Touch/Click Coordinates."""
     model, processor = get_sam3()
     if not model: raise RuntimeError(f"SAM 3 not loaded: {SAM3_LOAD_ERROR}")
 
     with torch.no_grad():
+        # Load image into state
         inference_state = processor.set_image(img_pil)
-        output = processor.set_text_prompt(state=inference_state, prompt=text_prompt)
         
-    return process_sam3_masks(output["masks"])
+        # Get image dimensions to normalize the coordinates
+        img_w, img_h = img_pil.size
+        
+        # Convert absolute (x, y) to normalized [0, 1] center coordinates
+        cx = x / img_w
+        cy = y / img_h
+        
+        # Create a tiny bounding box (1% of image size) centered exactly on the click
+        tiny_box = [cx, cy, 0.01, 0.01]
+        
+        # Pass it to SAM 3's geometric prompter (label=True means positive selection)
+        output_state = processor.add_geometric_prompt(
+            box=tiny_box, 
+            label=True, 
+            state=inference_state
+        )
+        
+    return process_sam3_masks(output_state["masks"])
 
 def run_inference_sam3_point_sync(img_pil, x, y):
     """Blocking GPU Inference for Touch/Click Coordinates."""
