@@ -88,16 +88,20 @@ def run_inference_sam3_point_sync(img_pil, x, y):
         # 2. Get image dimensions to normalize the coordinates
         img_w, img_h = img_pil.size
         
-        # 3. Convert absolute (x, y) to normalized [0, 1] center coordinates
-        cx = x / img_w
-        cy = y / img_h
+        # 3. Create a tiny 10x10 pixel box centered on the user's click
+        # Using the exact cxcywh format required by Meta's processor
+        center_x = x / img_w
+        center_y = y / img_h
         
-        # 4. Create a tiny bounding box (1% of image size) centered exactly on the click
-        tiny_box = [cx, cy, 0.01, 0.01]
+        # Give the box a tiny, non-zero physical area (10 pixels) normalized to percentages
+        width = 10.0 / img_w
+        height = 10.0 / img_h
+        
+        box = [center_x, center_y, width, height]
         
         # 5. Pass it to SAM 3's geometric prompter (label=True means positive selection)
         output_state = processor.add_geometric_prompt(
-            box=tiny_box, 
+            box=box, 
             label=True, 
             state=inference_state
         )
