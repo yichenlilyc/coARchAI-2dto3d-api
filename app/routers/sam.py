@@ -71,20 +71,20 @@ def run_inference_sam3_point_sync(img_pil, x, y):
     if not model: raise RuntimeError(f"SAM 3 not loaded: {SAM3_LOAD_ERROR}")
 
     with torch.no_grad():
-        # Load image into state
+        # 1. Load image into state
         inference_state = processor.set_image(img_pil)
         
-        # Get image dimensions to normalize the coordinates
+        # 2. Get image dimensions to normalize the coordinates
         img_w, img_h = img_pil.size
         
-        # Convert absolute (x, y) to normalized [0, 1] center coordinates
+        # 3. Convert absolute (x, y) to normalized [0, 1] center coordinates
         cx = x / img_w
         cy = y / img_h
         
-        # Create a tiny bounding box (1% of image size) centered exactly on the click
+        # 4. Create a tiny bounding box (1% of image size) centered exactly on the click
         tiny_box = [cx, cy, 0.01, 0.01]
         
-        # Pass it to SAM 3's geometric prompter (label=True means positive selection)
+        # 5. Pass it to SAM 3's geometric prompter (label=True means positive selection)
         output_state = processor.add_geometric_prompt(
             box=tiny_box, 
             label=True, 
@@ -99,15 +99,27 @@ def run_inference_sam3_point_sync(img_pil, x, y):
     if not model: raise RuntimeError(f"SAM 3 not loaded: {SAM3_LOAD_ERROR}")
 
     with torch.no_grad():
+        #  Load image into state
         inference_state = processor.set_image(img_pil)
-        # Pass the (x, y) coordinate as a positive point prompt (label 1)
-        output = processor.set_point_prompt(
-            state=inference_state, 
-            point_coords=[[x, y]], 
-            point_labels=[1]
+        
+        #  Get image dimensions to normalize the coordinates
+        img_w, img_h = img_pil.size
+        
+        #  Convert absolute (x, y) to normalized [0, 1] center coordinates
+        cx = x / img_w
+        cy = y / img_h
+        
+        #  Create a tiny bounding box (1% of image size) centered exactly on the click
+        tiny_box = [cx, cy, 0.01, 0.01]
+        
+        #  Pass it to SAM 3's geometric prompter (label=True means positive selection)
+        output_state = processor.add_geometric_prompt(
+            box=tiny_box, 
+            label=True, 
+            state=inference_state
         )
         
-    return process_sam3_masks(output["masks"])
+    return process_sam3_masks(output_state["masks"])
 
 # Router Endpoints
 
