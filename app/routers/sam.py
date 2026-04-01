@@ -185,9 +185,15 @@ async def generate_3d_sam(payload: dict = Body(...)):
         img.save(img_path)
         mask_img.save(mask_path)
 
+        source_image_url = payload.get("source_image_url", "unknown")
+
         ticket_path = os.path.join(settings.SAM_TASKS_DIR, f"{task_id}.json")
         with open(ticket_path, "w") as f:
-            json.dump({"task_id": task_id, "status": "queued"}, f)
+            json.dump({
+                "task_id": task_id, 
+                "status": "queued",
+                "source_image_id": source_image_url # Save it to the ticket!
+            }, f)
 
         # Handoff to GPU 1 Worker
         worker_payload = {"task_id": task_id, "img_path": img_path, "mask_path": mask_path}
