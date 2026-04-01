@@ -8,7 +8,7 @@ from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import Response
 
 from app.services.common import load_image_from_payload
-from app.services.storage import save_generated_glb
+from app.services.firebase_storage import save_model_to_firebase
 
 from app.services.shape import get_shape_pipe, shape_load_error
 from app.services.triposr import get_triposr, TRIPOSR_IMPORT_ERROR
@@ -107,24 +107,27 @@ def image_to_3d_triposr(payload: dict = Body(...), seed: Optional[int] = None):
 @router.post("/image-to-3d/tripo3d")
 async def image_to_3d_tripo3d(payload: dict = Body(...)):
     try:
-        # 1. Fetch the raw bytes from the Tripo3D API
+        # 1. Fetch the raw bytes from the Tripo3D Cloud API
         glb_bytes, tripo_meta = await tripo3d_from_payload_sync_glb(payload)
         
-        # 2. Upload the bytes to Firebase and stamp it with the user's identity
-        meta = save_generated_glb(
-            glb_bytes,
-            engine="Tripo3D",
-            source_url=payload.get("source_image_url", payload.get("url")),
+        # 2. Upload directly to Firebase using the modern SAM 3 uploader!
+        firebase_record = save_model_to_firebase(
+            file_bytes=glb_bytes,
             user_id=payload.get("user_id", "anonymous"),
-            params={"tripo_task_id": tripo_meta.get("task_id", "unknown")}
+            model_id=tripo_meta.get("task_id", str(uuid.uuid4())),
+            source_image_id=payload.get("source_image_url", "unknown"),
+            format="glb"
         )
         
         headers = {
             "Content-Disposition": 'attachment; filename="tripo3d.glb"',
-            "X-Model-URL": meta.get("url", ""),
+            "X-Model-URL": firebase_record.get("glb_url", ""),
         }
         return Response(content=glb_bytes, media_type="model/gltf-binary", headers=headers)
+    
     except HTTPException:
         raise
     except Exception as e:
+        # Print the exact error to your RunPod terminal just in case!
+        print(f"TRIPO3D CRASH: {e}") 
         return json_error("Tripo3D inference failed", stage="tripo3d", exc=e)
