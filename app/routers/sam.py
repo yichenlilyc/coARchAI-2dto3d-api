@@ -15,6 +15,9 @@ from PIL import Image
 import numpy as np
 import torch
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 # Import App Sevices
 from app import settings
 from app.services.common import load_image_from_payload, decode_data_url_to_bytes
@@ -22,6 +25,7 @@ from app.services.errors import json_error
 from app.services.firebase_storage import save_model_to_firebase
 
 router = APIRouter()
+
 # --- SAM 3 ---
 # Lazy Load SAM 3
 sam3_model = None
@@ -39,7 +43,9 @@ def get_sam3():
         from sam3.model.sam3_image_processor import Sam3Processor
         
         print("Initializing native SAM 3 Model for Prompts and Clicks...")
-        sam3_model = build_sam3_image_model()
+        
+        # FIX 1: Explicitly force the model weights into the GPU as bfloat16
+        sam3_model = build_sam3_image_model().to("cuda")
         sam3_processor = Sam3Processor(sam3_model)
         
         SAM3_LOAD_ERROR = None
@@ -71,9 +77,10 @@ def run_inference_sam3_prompt_sync(img_pil, text_prompt):
     if not model: raise RuntimeError(f"SAM 3 not loaded: {SAM3_LOAD_ERROR}")
 
     with torch.no_grad():
-        inference_state = processor.set_image(img_pil)
-        output = processor.set_text_prompt(state=inference_state, prompt=text_prompt)
-        
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            inference_state = processor.set_image(img_pil)
+            output = processor.set_text_prompt(state=inference_state, prompt=text_prompt)
+            
     return process_sam3_masks(output["masks"])
 
 def run_inference_sam3_point_sync(img_pil, x, y):
@@ -82,29 +89,33 @@ def run_inference_sam3_point_sync(img_pil, x, y):
     if not model: raise RuntimeError(f"SAM 3 not loaded: {SAM3_LOAD_ERROR}")
 
     with torch.no_grad():
-        # 1. Load image into state
-        inference_state = processor.set_image(img_pil)
-        
-        # 2. Get image dimensions to normalize the coordinates
-        img_w, img_h = img_pil.size
-        
-        # 3. Create a tiny 10x10 pixel box centered on the user's click
-        # Using the exact cxcywh format required by Meta's processor
-        center_x = x / img_w
-        center_y = y / img_h
-        
-        # Give the box a tiny, non-zero physical area (10 pixels) normalized to percentages
-        width = 10.0 / img_w
-        height = 10.0 / img_h
-        
-        box = [center_x, center_y, width, height]
-        
-        # 5. Pass it to SAM 3's geometric prompter (label=True means positive selection)
-        output_state = processor.add_geometric_prompt(
-            box=box, 
-            label=True, 
-            state=inference_state
-        )
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            # 1. Load image into state
+            inference_state = processor.set_image(img_pil)
+            
+            # FIX 2: Restore the hidden generic concept so SAM 3 knows what a click is
+            inference_state = processor.set_text_prompt(state=inference_state, prompt="object")
+            
+            # 2. Get image dimensions to normalize the coordinates
+            img_w, img_h = img_pil.size
+            
+            # 3. Create a tiny 10x10 pixel box centered on the user's click
+            # Using the exact cxcywh format required by Meta's processor
+            center_x = x / img_w
+            center_y = y / img_h
+            
+            # Give the box a tiny, non-zero physical area (10 pixels) normalized to percentages
+            width = 10.0 / img_w
+            height = 10.0 / img_h
+            
+            box = [center_x, center_y, width, height]
+            
+            # 4. Pass it to SAM 3's geometric prompter (label=True means positive selection)
+            output_state = processor.add_geometric_prompt(
+                box=box, 
+                label=True, 
+                state=inference_state
+            )
         
     return process_sam3_masks(output_state["masks"])
 
@@ -159,7 +170,6 @@ async def segment_image_prompt(payload: dict = Body(...)):
         
     except Exception as e:
         return json_error(str(e), stage="sam3-prompt", exc=e)
-
 
 # Start 3D Generation (SAM 3D Worker)
 @router.post("/image-to-3d/sam/generate")
