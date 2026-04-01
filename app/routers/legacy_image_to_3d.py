@@ -1,4 +1,3 @@
-# app/routers/legacy_image_to_3d.py
 from __future__ import annotations
 
 import os
@@ -56,13 +55,14 @@ def image_to_3d_shape(
         meta = save_generated_glb(
             glb_bytes,
             engine="ShapE",
-            source_url=payload.get("url"),
+            source_url=payload.get("source_image_url", payload.get("url")),
+            user_id=payload.get("user_id", "anonymous"),
             seed=None,
             params={"guidance_scale": guidance_scale, "steps": steps, "frame_size": frame_size},
         )
         headers = {
             "Content-Disposition": 'attachment; filename="shap-e.glb"',
-            "X-Model-URL": meta["url"],
+            "X-Model-URL": meta.get("url", ""),
         }
         return Response(content=glb_bytes, media_type="model/gltf-binary", headers=headers)
     except Exception as e:
@@ -90,13 +90,14 @@ def image_to_3d_triposr(payload: dict = Body(...), seed: Optional[int] = None):
         meta = save_generated_glb(
             glb_bytes,
             engine="TripoSR",
-            source_url=payload.get("url"),
+            source_url=payload.get("source_image_url", payload.get("url")),
+            user_id=payload.get("user_id", "anonymous"),
             seed=seed,
             params=used_params,
         )
         headers = {
             "Content-Disposition": 'attachment; filename="triposr.glb"',
-            "X-Model-URL": meta["url"],
+            "X-Model-URL": meta.get("url", ""),
         }
         return Response(content=glb_bytes, media_type="model/gltf-binary", headers=headers)
     except Exception as e:
@@ -106,10 +107,21 @@ def image_to_3d_triposr(payload: dict = Body(...), seed: Optional[int] = None):
 @router.post("/image-to-3d/tripo3d")
 async def image_to_3d_tripo3d(payload: dict = Body(...)):
     try:
-        glb_bytes, meta = await tripo3d_from_payload_sync_glb(payload)
+        # 1. Fetch the raw bytes from the Tripo3D API
+        glb_bytes, tripo_meta = await tripo3d_from_payload_sync_glb(payload)
+        
+        # 2. Upload the bytes to Firebase and stamp it with the user's identity
+        meta = save_generated_glb(
+            glb_bytes,
+            engine="Tripo3D",
+            source_url=payload.get("source_image_url", payload.get("url")),
+            user_id=payload.get("user_id", "anonymous"),
+            params={"tripo_task_id": tripo_meta.get("task_id", "unknown")}
+        )
+        
         headers = {
             "Content-Disposition": 'attachment; filename="tripo3d.glb"',
-            "X-Model-URL": meta["url"],
+            "X-Model-URL": meta.get("url", ""),
         }
         return Response(content=glb_bytes, media_type="model/gltf-binary", headers=headers)
     except HTTPException:
