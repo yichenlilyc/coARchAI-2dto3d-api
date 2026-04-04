@@ -107,30 +107,7 @@ def image_to_3d_triposr(payload: dict = Body(...), seed: Optional[int] = None):
 @router.post("/image-to-3d/tripo3d")
 async def image_to_3d_tripo3d(payload: dict = Body(...)):
     try:
-        # 1. Fetch the raw bytes from the Tripo3D Cloud API
-        glb_bytes, tripo_meta = await tripo3d_from_payload_sync_glb(payload)
-        
-        # 2. Upload directly to Firebase using the modern SAM 3 uploader!
-        firebase_record = save_model_to_firebase(
-            file_bytes=glb_bytes,
-            user_id=payload.get("user_id", "anonymous"),
-            model_id=tripo_meta.get("task_id", str(uuid.uuid4())),
-            source_image_id=payload.get("source_image_url", "unknown"),
-            format="glb"
-        )
-        
-        headers = {
-            "Content-Disposition": 'attachment; filename="tripo3d.glb"',
-            "X-Model-URL": firebase_record.get("glb_url", ""),
-        }
-        return Response(content=glb_bytes, media_type="model/gltf-binary", headers=headers)
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        # Print the exact error to your RunPod terminal just in case!
-        print(f"TRIPO3D CRASH: {e}") 
-        return json_error("Tripo3D inference failed", stage="tripo3d", exc=e)
+        # Handoff to the new main branch background job service
         return await tripo3d_start_job(payload)
     except HTTPException:
         raise
@@ -141,6 +118,7 @@ async def image_to_3d_tripo3d(payload: dict = Body(...)):
 @router.get("/image-to-3d/tripo3d/{job_id}")
 def image_to_3d_tripo3d_status(job_id: str):
     try:
+        # Polling endpoint for the new background job service
         return tripo3d_get_job(job_id)
     except HTTPException:
         raise
