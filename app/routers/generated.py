@@ -14,7 +14,8 @@ router = APIRouter()
 @router.post("/generated/images")
 async def upload_image(
     file: UploadFile = File(...), 
-    user_id: str = Form("anonymous_student") # Accepts user_id from the frontend form
+    user_id: str = Form("anonymous_student"), # Accepts user_id from the frontend form
+    prompt: Optional[str] = Form(None)
 ):
     """Uploads a 2D image to Firebase Storage and saves metadata to Firestore."""
     db, bucket = get_db(), get_bucket()
@@ -39,7 +40,8 @@ async def upload_image(
         "storage_url": blob.public_url,
         "filename": file.filename,
         "created_at": datetime.utcnow().isoformat() + "Z",
-        "size_bytes": len(file_bytes)
+        "size_bytes": len(file_bytes),
+        "prompt": prompt
     }
     db.collection("images_2d").document(image_id).set(doc_data)
 
