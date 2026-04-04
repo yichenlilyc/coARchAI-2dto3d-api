@@ -36,3 +36,6 @@ gradio==4.44.0
 
 # ---- Native extension (needs torch preinstalled in Docker) ----
 git+https://github.com/tatsy/torchmcubes.git
+
+# ---- For Deployment ---
+firebase-admin==6.4.0

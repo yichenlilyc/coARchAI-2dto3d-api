@@ -18,6 +18,16 @@ PRESET_MAPS_DIR = os.getenv("PRESET_MAPS_DIR", "/app/data/presets/maps")
 PRESET_MODELS_DIR = os.getenv("PRESET_MODELS_DIR", "/app/data/presets/models")
 UPLOAD_MODELS_DIR = os.getenv("UPLOAD_MODELS_DIR", "/app/data/uploads/models")
 
+# --- SAM PIPELINE DIRECTORIES ---
+SAM_TASKS_DIR = os.getenv("SAM_TASKS_DIR", "/app/tasks")
+SAM_TEMP_DIR = os.getenv("SAM_TEMP_DIR", "/app/temp")
+
+for d in (SAM_TASKS_DIR, SAM_TEMP_DIR):
+    os.makedirs(d, exist_ok=True)
+
+# The internal URL the Main API uses to ping the Worker GPU
+SAM_WORKER_URL = os.getenv("SAM_WORKER_URL", "http://sam-worker:8001/process-3d")
+
 for d in (PRESET_MAPS_DIR, PRESET_MODELS_DIR, UPLOAD_MODELS_DIR):
     os.makedirs(d, exist_ok=True)
 

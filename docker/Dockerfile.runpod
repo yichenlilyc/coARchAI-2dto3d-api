@@ -2,13 +2,9 @@
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-# You can override this at build time: --build-arg CUDA_ARCH_LIST="70;75;80;86;89;90"
-# (Default covers Turing 20xx, Ampere 30xx, Ada 40xx, Hopper 90)
-# at the top (or before you set ENV)
 ENV PATH="/root/miniconda3/bin:${PATH}"
 ENV CUDA_HOME="/usr/local/cuda"
 ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
-
 
 ARG CUDA_ARCH_LIST="90;89;86;80;75"
 ARG TORCH_CUDA_ARCH_DOT="9.0;8.9;8.6;8.0;7.5"
@@ -28,7 +24,6 @@ RUN conda install -y python=3.11
 # Pytorch for base environment
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir "scikit-build-core>=0.11.6" cmake ninja "pybind11[global]>=2.11"
-
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu128 torch==2.8.0+cu128
 
 WORKDIR /app
@@ -50,7 +45,7 @@ WORKDIR /app/external/sam-3d-objects
 # Conda env
 RUN conda env create -f environments/default.yml
 
-# activate the env for next steops
+# Activate the env for next steps
 SHELL ["conda", "run", "-n", "sam3d-objects", "/bin/bash", "-c"]
 
 ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9+PTX"
@@ -66,12 +61,12 @@ RUN pip install --no-build-isolation -e '.[inference]'
 # Add server deps to the isolated worker
 RUN pip install fastapi uvicorn python-multipart pydantic
 
-# fix bugs with SAM models
+# Fix bugs with SAM models
 RUN chmod +x ./patching/hydra && ./patching/hydra
 RUN sed -i 's/if mask_points.isfinite().max() == 0:/if mask_points.numel() == 0 or mask_points.isfinite().max() == 0:/g' /app/external/sam-3d-objects/sam3d_objects/data/dataset/tdfy/img_and_mask_transforms.py
 RUN sed -i 's/self.rendering_engine = .*/self.rendering_engine = "nvdiffrast"/g' /app/external/sam-3d-objects/sam3d_objects/pipeline/inference_pipeline.py
 
-# reset shell back to default for the server
+# Reset shell back to default for the server
 SHELL ["/bin/bash", "-c"]
 
 # Final download of models
@@ -80,5 +75,41 @@ COPY scripts/download_models.py ./scripts/download_models.py
 
 ARG HF_TOKEN
 ENV HF_TOKEN=${HF_TOKEN}
-
 RUN python scripts/download_models.py
+
+# Runpod Deployment Setup 
+
+# Install Cloudflare Tunnel
+RUN curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb && \
+    dpkg -i cloudflared.deb && \
+    rm cloudflared.deb
+
+# Bake in Static Environment Variables
+ENV GENERATED_IMAGES_DIR=/app/generated/images
+ENV GENERATED_MODELS_DIR=/app/generated/models
+ENV FB_UPLOAD_DIR=/app/fbupload
+ENV PRESET_MAPS_DIR=/app/data/presets/maps
+ENV PRESET_MODELS_DIR=/app/data/presets/models
+ENV UPLOAD_MODELS_DIR=/app/data/uploads/models
+ENV SAM_TASKS_DIR=/app/tasks
+ENV SAM_TEMP_DIR=/app/temp
+ENV USE_CUDA="1"
+ENV TRIPOSR_MODEL_DIR=/app/external/TripoSR
+ENV TRIPOSR_CONFIG=config.yaml
+ENV TRIPOSR_WEIGHTS=model.ckpt
+ENV USE_TRIPO_SDK="1"
+ENV TRIPO3D_BASE="https://api.tripo3d.ai/v2/openapi"
+ENV TRIPO3D_MODEL_VERSION="v2.0-20240919"
+ENV TRIPO3D_POLL_SECONDS="2.0"
+ENV TRIPO3D_TIMEOUT_SECONDS="1800"
+
+# Update internal routing to localhost
+ENV SAM_WORKER_URL="http://127.0.0.1:8001/process-3d"
+
+# Copy the rest of the application code
+COPY . /app
+WORKDIR /app
+
+RUN mkdir -p /app/generated/images /app/generated/models /app/tasks /app/temp /app/checkpoints
+
+CMD ["python", "launcher.py"]

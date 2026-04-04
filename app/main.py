@@ -2,6 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+import os
 
 from app import settings
 from app.routers.health import router as health_router
@@ -10,11 +11,25 @@ from app.routers.firebase_legacy import router as firebase_legacy_router
 from app.routers.legacy_image_to_3d import router as legacy_image_to_3d_router
 from app.routers.uploads import router as uploads_router
 from app.routers.presets import router as presets_router
+from app.routers.sam import router as sam_router
 from app.routers.dictation import router as dictation_router
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="2D→3D Service (Shap-E + Tripo)")
+    server_configs = []
+
+    # Check if the environment variable is set already, if so use it
+    public_url = os.environ.get("PUBLIC_BASE_URL")
+    if public_url:
+        server_configs.append({"url": public_url, "description": "Public Cloudflare Tunnel"})
+
+    # Pass the metadata and dynamic server list to FastAPI
+    app = FastAPI(
+        title="CoARchAI 2D-to-3D API",
+        description="Image to 3D Generation API (Shap-E, Tripo, Meta SAM)",
+        version="0.1.0",
+        servers=server_configs
+    )
 
     app.add_middleware(
         CORSMiddleware,
@@ -42,6 +57,7 @@ def create_app() -> FastAPI:
     app.include_router(legacy_image_to_3d_router, tags=["legacy"])
     app.include_router(uploads_router, tags=["uploads"])
     app.include_router(presets_router, tags=["presets"])
+    app.include_router(sam_router, tags=["sam"])
     app.include_router(dictation_router, tags=["dictation"])
 
     return app
