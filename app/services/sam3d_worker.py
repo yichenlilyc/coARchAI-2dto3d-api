@@ -96,7 +96,7 @@ def smart_crop(img_rgb, mask_uint8, margin=0.1):
 
 def run_3d_generation(task_id: str, img_path: str, mask_path: str):
     """The core generation logic, outputting directly to the gallery directory."""
-    update_ticket(task_id, "processing")
+    update_ticket(task_id, "running")
     try:
         img_rgb = np.array(Image.open(img_path).convert("RGB"))
         mask_raw = np.array(Image.open(mask_path).convert("L"))
@@ -153,7 +153,7 @@ def run_3d_generation(task_id: str, img_path: str, mask_path: str):
         print(f"Task {task_id} completed. Saved as {glb_name} in Gallery.")
         
         # Give the main API the exact paths to serve
-        update_ticket(task_id, "completed", glb_file=glb_path, ply_file=ply_path)
+        update_ticket(task_id, "succeeded", glb_file=glb_path, ply_file=ply_path)
 
     except Exception as e:
         traceback.print_exc()
