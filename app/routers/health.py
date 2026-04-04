@@ -35,4 +35,13 @@ def health():
         "triposr_weights": wgt,
         "triposr_config_exists": cfg_exists,
         "triposr_weights_exists": wgt_exists,
+        "dictation": {
+            "openai_configured": bool(settings.OPENAI_API_KEY),
+            "transcribe_model": settings.OPENAI_TRANSCRIBE_MODEL,
+            "realtime_model": settings.OPENAI_REALTIME_MODEL,
+            "max_upload_mb": settings.DICTATION_MAX_UPLOAD_MB,
+            "audio_retention": settings.DICTATION_AUDIO_RETENTION,
+            "debug_dir": settings.DICTATION_DEBUG_DIR,
+            "debug_dir_exists": os.path.isdir(settings.DICTATION_DEBUG_DIR),
+        },
     }

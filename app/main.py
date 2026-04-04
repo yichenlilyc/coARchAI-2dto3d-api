@@ -12,6 +12,7 @@ from app.routers.legacy_image_to_3d import router as legacy_image_to_3d_router
 from app.routers.uploads import router as uploads_router
 from app.routers.presets import router as presets_router
 from app.routers.sam import router as sam_router
+from app.routers.dictation import router as dictation_router
 
 
 def create_app() -> FastAPI:
@@ -43,6 +44,10 @@ def create_app() -> FastAPI:
     app.mount("/static/generated/models", StaticFiles(directory=settings.GENERATED_MODELS_DIR), name="generated_models_static")
     app.mount("/static/fbupload", StaticFiles(directory=settings.FB_UPLOAD_DIR), name="fbupload_static")
 
+    app.mount("/presets/maps",StaticFiles(directory=settings.PRESET_MAPS_DIR),name="preset_maps_static")
+    app.mount("/presets/models",StaticFiles(directory=settings.PRESET_MODELS_DIR),name="preset_models_static")
+    app.mount("/static/uploads/models",StaticFiles(directory=settings.UPLOAD_MODELS_DIR),name="upload_models_static")
+
 
 
     # Routers
@@ -53,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(uploads_router, tags=["uploads"])
     app.include_router(presets_router, tags=["presets"])
     app.include_router(sam_router, tags=["sam"])
+    app.include_router(dictation_router, tags=["dictation"])
 
     return app
 

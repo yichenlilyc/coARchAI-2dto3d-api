@@ -43,6 +43,7 @@ services:
       FIREBASE_DB_URL: ${FIREBASE_DB_URL}
       FIREBASE_DB_AUTH: ${FIREBASE_DB_AUTH:-}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
 
       SAM_WORKER_URL: "http://sam-worker:8001/process-3d"
     volumes: 
@@ -78,6 +79,29 @@ services:
       GENERATED_MODELS_DIR: /app/generated/models
       SAM_TASKS_DIR: /app/tasks
       SAM_TEMP_DIR: /app/temp
+      FB_UPLOAD_DIR: /app/fbupload
+
+      PRESET_MAPS_DIR: /app/data/presets/maps
+      PRESET_MODELS_DIR: /app/data/presets/models
+      UPLOAD_MODELS_DIR: /app/data/uploads/models
+
+      USE_CUDA: "0"
+
+      TRIPOSR_MODEL_DIR: /app/external/TripoSR
+      TRIPOSR_CONFIG: config.yaml
+      TRIPOSR_WEIGHTS: model.ckpt
+
+      TRIPO3D_API_KEY: "${TRIPO3D_API_KEY}"
+      USE_TRIPO_SDK: "1"
+      TRIPO3D_BASE: "https://api.tripo3d.ai/v2/openapi"
+      TRIPO3D_MODEL_VERSION: "v2.0-20240919"
+      TRIPO3D_POLL_SECONDS: "2.0"
+      TRIPO3D_TIMEOUT_SECONDS: "1800"
+
+      FIREBASE_DB_URL: ${FIREBASE_DB_URL}
+      FIREBASE_DB_AUTH: ${FIREBASE_DB_AUTH:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
     volumes:
       - .:/app:rw
       - ./generated:/app/generated
