@@ -55,13 +55,24 @@ def load_model():
 
 def update_ticket(task_id: str, status: str, error: str = None, **kwargs):
     """Updates the JSON ticket so the Main API can poll the status."""
-    data = {"task_id": task_id, "status": status}
+    ticket_path = os.path.join(settings.SAM_TASKS_DIR, f"{task_id}.json")
+    
+    # read existing data first
+    data = {}
+    if os.path.exists(ticket_path):
+        try:
+            with open(ticket_path, "r") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+
+    # update with new status and kwargs
+    data["task_id"] = task_id
+    data["status"] = status
     if error: data["error"] = error
     data.update(kwargs)
 
-    ticket_path = os.path.join(settings.SAM_TASKS_DIR, f"{task_id}.json")
     temp_path = f"{ticket_path}.tmp"
-    
     with open(temp_path, "w") as f:
         json.dump(data, f)
     os.replace(temp_path, ticket_path)

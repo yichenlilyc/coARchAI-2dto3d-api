@@ -202,7 +202,7 @@ async def generate_3d_sam(payload: dict = Body(...)):
             json.dump({
                 "task_id": task_id, 
                 "status": "queued",
-                "source_image_id": source_image_url # Save it to the ticket!
+                "source_image_id": source_image_url 
             }, f)
 
         # Handoff to GPU 1 Worker
