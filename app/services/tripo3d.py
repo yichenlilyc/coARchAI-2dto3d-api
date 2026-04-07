@@ -394,7 +394,7 @@ async def _run_tripo3d_job(job_id: str) -> None:
                 file_bytes=glb_bytes,
                 user_id=payload.get("user_id", "anonymous_student"),
                 model_id=job.get("task_id", "unknown_task"),
-                source_image_id=payload.get("source_image_url", "unknown"),
+                source_image_id=payload.get("source_image_url") or payload.get("url") or "unknown",
                 format="glb"
             )
 
@@ -466,7 +466,7 @@ async def _run_tripo3d_job(job_id: str) -> None:
                 meta = save_generated_glb(
                     glb_bytes,
                     engine="Tripo3D",
-                    source_url=job.get("source_url"),
+                    source_url=job.get("source_url") or preview_url,
                     seed=None,
                     params=job.get("params") or {},
                 )
@@ -477,7 +477,7 @@ async def _run_tripo3d_job(job_id: str) -> None:
                     file_bytes=glb_bytes,
                     user_id=payload.get("user_id", "anonymous_student"),
                     model_id=job.get("task_id", "unknown_task"),
-                    source_image_id=payload.get("source_image_url", "unknown"),
+                    source_image_id=payload.get("source_image_url") or payload.get("url") or preview_url or "unknown",
                     format="glb"
                 )
 
