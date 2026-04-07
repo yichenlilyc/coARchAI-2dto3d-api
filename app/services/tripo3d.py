@@ -13,6 +13,7 @@ from fastapi.concurrency import run_in_threadpool
 from app import settings
 from app.services.common import download_bytes, guess_filename_from_url
 from app.services.storage import save_generated_glb
+from app.services.firebase_storage import save_model_to_firebase
 
 # ---- Tripo SDK (optional) ----
 try:
@@ -387,6 +388,16 @@ async def _run_tripo3d_job(job_id: str) -> None:
                 params=job.get("params") or {},
             )
 
+            # Upload to Firebase 
+            payload = job.get("original_payload", {})
+            firebase_record = save_model_to_firebase(
+                file_bytes=glb_bytes,
+                user_id=payload.get("user_id", "anonymous_student"),
+                model_id=job.get("task_id", "unknown_task"),
+                source_image_id=payload.get("source_image_url", "unknown"),
+                format="glb"
+            )
+
             job["status"] = "succeeded"
             job["model_url"] = meta["url"]
             job["preview_url"] = None
@@ -460,6 +471,16 @@ async def _run_tripo3d_job(job_id: str) -> None:
                     params=job.get("params") or {},
                 )
 
+                # Upload to Firebase 
+                payload = job.get("original_payload", {})
+                firebase_record = save_model_to_firebase(
+                    file_bytes=glb_bytes,
+                    user_id=payload.get("user_id", "anonymous_student"),
+                    model_id=job.get("task_id", "unknown_task"),
+                    source_image_id=payload.get("source_image_url", "unknown"),
+                    format="glb"
+                )
+
                 job["status"] = "succeeded"
                 job["model_url"] = meta["url"]
                 job["preview_url"] = preview_url
@@ -500,6 +521,7 @@ async def tripo3d_start_job(payload: dict) -> Dict[str, Any]:
         "updated_at": _now_ts(),
         "source_url": source_url,
         "params": params,
+        "original_payload": payload,
         "model_url": None,
         "preview_url": None,
         "error": None,

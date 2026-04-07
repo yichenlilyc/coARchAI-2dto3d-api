@@ -174,6 +174,7 @@ async def segment_image_prompt(payload: dict = Body(...)):
 # Start 3D Generation (SAM 3D Worker)
 @router.post("/image-to-3d/sam/generate")
 async def generate_3d_sam(payload: dict = Body(...)):
+    # generate a task_id internally for the worker
     task_id = str(uuid.uuid4())
 
     try: 
@@ -185,7 +186,7 @@ async def generate_3d_sam(payload: dict = Body(...)):
         if "mask_b64" not in payload:
             return json_error("Missing 'mask_b64' in payload", stage="sam-generate")
             
-        # Decode mask using your existing helper
+        # decode mask using helper
         mask_raw = decode_data_url_to_bytes(payload["mask_b64"])
         mask_img = Image.open(io.BytesIO(mask_raw)).convert("L")
 
@@ -202,14 +203,14 @@ async def generate_3d_sam(payload: dict = Body(...)):
             json.dump({
                 "task_id": task_id, 
                 "status": "queued",
-                "source_image_id": source_image_url # Save it to the ticket!
+                "source_image_id": source_image_url 
             }, f)
 
-        # Handoff to GPU 1 Worker
+        # To GPU 1 Worker
         worker_payload = {"task_id": task_id, "img_path": img_path, "mask_path": mask_path}
         
         try:
-            # Ping the URL defined in settings.py
+            # ping the URL defined in settings.py
             response = requests.post(settings.SAM_WORKER_URL, json=worker_payload, timeout=3.0)
             response.raise_for_status() 
         except Exception as comm_error:
@@ -217,19 +218,19 @@ async def generate_3d_sam(payload: dict = Body(...)):
                 json.dump({"task_id": task_id, "status": "failed", "error": "Internal Worker offline"}, f)
             return json_error("Internal 3D Worker is offline.", stage="sam-handoff", exc=comm_error)
 
-        return {"task_id": task_id, "status": "queued"}
+        return {"job_id": task_id, "status": "queued"}
     
     except Exception as e:
         return json_error("Failed to queue SAM 3D generation", stage="sam-generate", exc=e)
 
 
 # Poll Status & Serve File
-@router.get("/image-to-3d/sam/status/{task_id}")
-async def check_sam_status(task_id: str, format: str = "glb", user_id: str = "anonymous_student"):
+@router.get("/image-to-3d/sam/status/{job_id}")
+async def check_sam_status(job_id: str, format: str = "glb", user_id: str = "anonymous_student"):
     if format not in ["glb", "ply"]:
         return json_error("Invalid format. Use 'glb' or 'ply'.", stage="sam-status")
     
-    status_file = os.path.join(settings.SAM_TASKS_DIR, f"{task_id}.json")
+    status_file = os.path.join(settings.SAM_TASKS_DIR, f"{job_id}.json")
     if not os.path.exists(status_file):
         raise HTTPException(status_code=404, detail="Task not found")
     
@@ -237,41 +238,40 @@ async def check_sam_status(task_id: str, format: str = "glb", user_id: str = "an
         with open(status_file, "r") as f:
             data = json.load(f)
         
-        if data.get("status") == "completed":
+        if data.get("status") == "succeeded":
             target_file = data.get(f"{format}_file") 
             
             if target_file and os.path.exists(target_file):
-                # Check if we already uploaded it
+                # check if already uploaded it
                 firebase_key = f"firebase_{format}_url"
                 
                 if firebase_key not in data:
-                    # Read the local mesh file
+                    # read the local mesh file
                     with open(target_file, "rb") as mesh_file:
                         file_bytes = mesh_file.read()
                     
-                    # Upload to Firebase and get the public URL
+                    # upload to Firebase and get the public URL
                     firebase_record = save_model_to_firebase(
                         file_bytes=file_bytes, 
                         user_id=user_id, 
-                        model_id=task_id,
+                        model_id=job_id,
                         source_image_id=data.get("source_image_id", "unknown"),
                         format=format
                     )
                     
-                    # Save the new Firebase URL into the local so we don't upload it twice
+                    # save the new Firebase URL into the local so we don't upload it twice
                     data[firebase_key] = firebase_record[f"{format}_url"]
                     with open(status_file, "w") as f:
                         json.dump(data, f)
                 
-                # Instead of saving the heavy file locally, redirect the user to download it from firebase
                 return JSONResponse(content={
-                    "status": "completed", 
+                    "status": "succeeded", 
                     "format": format,
-                    "download_url": data[firebase_key]
+                    "model_url": data[firebase_key]
                 })
 
             return JSONResponse(content={"status": "error", "error": f"{format.upper()} file missing on server."})
             
         return JSONResponse(content=data)
     except json.JSONDecodeError:
-        return JSONResponse(content={"status": "processing"})
+        return JSONResponse(content={"status": "running"})

@@ -11,7 +11,7 @@ processes = []
 cf_token = os.environ.get("CF_TUNNEL_TOKEN")
 if cf_token:
     print("Detected CF_TUNNEL_TOKEN. Starting Cloudflare Tunnel...", flush=True)
-    cf_process = subprocess.Popen(["cloudflared", "tunnel", "--no-autoupdate", "run", "--token", cf_token])
+    cf_process = subprocess.Popen(["cloudflared", "tunnel", "--protocol", "http2", "--no-autoupdate", "run", "--token", cf_token])
     processes.append(cf_process)
 else:
     print("No CF_TUNNEL_TOKEN found. Skipping Cloudflare.", flush=True)

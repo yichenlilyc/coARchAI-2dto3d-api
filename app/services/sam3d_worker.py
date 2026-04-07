@@ -55,13 +55,24 @@ def load_model():
 
 def update_ticket(task_id: str, status: str, error: str = None, **kwargs):
     """Updates the JSON ticket so the Main API can poll the status."""
-    data = {"task_id": task_id, "status": status}
+    ticket_path = os.path.join(settings.SAM_TASKS_DIR, f"{task_id}.json")
+    
+    # read existing data first
+    data = {}
+    if os.path.exists(ticket_path):
+        try:
+            with open(ticket_path, "r") as f:
+                data = json.load(f)
+        except Exception:
+            pass
+
+    # update with new status and kwargs
+    data["task_id"] = task_id
+    data["status"] = status
     if error: data["error"] = error
     data.update(kwargs)
 
-    ticket_path = os.path.join(settings.SAM_TASKS_DIR, f"{task_id}.json")
     temp_path = f"{ticket_path}.tmp"
-    
     with open(temp_path, "w") as f:
         json.dump(data, f)
     os.replace(temp_path, ticket_path)
@@ -85,7 +96,7 @@ def smart_crop(img_rgb, mask_uint8, margin=0.1):
 
 def run_3d_generation(task_id: str, img_path: str, mask_path: str):
     """The core generation logic, outputting directly to the gallery directory."""
-    update_ticket(task_id, "processing")
+    update_ticket(task_id, "running")
     try:
         img_rgb = np.array(Image.open(img_path).convert("RGB"))
         mask_raw = np.array(Image.open(mask_path).convert("L"))
@@ -142,7 +153,7 @@ def run_3d_generation(task_id: str, img_path: str, mask_path: str):
         print(f"Task {task_id} completed. Saved as {glb_name} in Gallery.")
         
         # Give the main API the exact paths to serve
-        update_ticket(task_id, "completed", glb_file=glb_path, ply_file=ply_path)
+        update_ticket(task_id, "succeeded", glb_file=glb_path, ply_file=ply_path)
 
     except Exception as e:
         traceback.print_exc()
