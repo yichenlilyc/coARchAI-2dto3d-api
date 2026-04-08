@@ -1,7 +1,7 @@
 from datetime import datetime
 from app.database import get_db, get_bucket
 
-def save_model_to_firebase(file_bytes: bytes, user_id: str, model_id: str, source_image_id: str = "unknown", format: str = "glb"):
+def save_model_to_firebase(file_bytes: bytes, user_id: str, model_id: str, source_image_id: str = "unknown", format: str = "glb", preview_url: str = None):
     """
     Uploads the 3D mesh or splat to Firebase Storage and merges metadata into Firestore.
     """
@@ -28,6 +28,7 @@ def save_model_to_firebase(file_bytes: bytes, user_id: str, model_id: str, sourc
         "model_id": model_id,
         "user_id": user_id,
         "source_image_id": source_image_id,
+        "preview_url": preview_url,
         f"{format}_url": public_url, # Dynamically saves as 'glb_url' OR 'ply_url'
         "created_at": datetime.utcnow().isoformat() + "Z",
         "status": "completed",
