@@ -405,6 +405,7 @@ async def _run_tripo3d_job(job_id: str) -> None:
                 user_id=payload.get("user_id", "anonymous_student"),
                 model_id=job.get("task_id", "unknown_task"),
                 source_image_id=payload.get("source_image_url") or payload.get("url") or "unknown",
+                preview_url=payload.get("source_image_url", "unknown"),
                 format="glb"
             )
 
@@ -498,6 +499,7 @@ async def _run_tripo3d_job(job_id: str) -> None:
                     user_id=payload.get("user_id", "anonymous_student"),
                     model_id=job.get("task_id", "unknown_task"),
                     source_image_id=payload.get("source_image_url") or payload.get("url") or preview_url or "unknown",
+                    preview_url=preview_url or payload.get("source_image_url") or "unknown",
                     format="glb"
                 )
 
