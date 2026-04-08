@@ -375,6 +375,8 @@ async def _run_tripo3d_job(job_id: str) -> None:
     job["status"] = "running"
     job["updated_at"] = _now_ts()
 
+    print("[TRIPO3D DEBUG] branch =", "SDK" if settings.USE_TRIPO_SDK else "REST")
+
     try:
         # SDK mode: use SDK for wait/download as well
         if settings.USE_TRIPO_SDK:
@@ -390,6 +392,14 @@ async def _run_tripo3d_job(job_id: str) -> None:
 
             # Upload to Firebase 
             payload = job.get("original_payload", {})
+
+            final_source_image_id = (
+                payload.get("source_image_url")
+                or payload.get("url")
+                or "unknown"
+            )
+            print("[TRIPO3D DEBUG][SDK] payload =", payload)
+            print("[TRIPO3D DEBUG][SDK] final_source_image_id =", final_source_image_id)
             firebase_record = save_model_to_firebase(
                 file_bytes=glb_bytes,
                 user_id=payload.get("user_id", "anonymous_student"),
@@ -473,6 +483,16 @@ async def _run_tripo3d_job(job_id: str) -> None:
 
                 # Upload to Firebase 
                 payload = job.get("original_payload", {})
+                final_source_image_id = (
+                    payload.get("source_image_url")
+                    or payload.get("url")
+                    or preview_url
+                    or "unknown"
+                )
+                print("[TRIPO3D DEBUG][REST] payload =", payload)
+                print("[TRIPO3D DEBUG][REST] preview_url =", preview_url)
+                print("[TRIPO3D DEBUG][REST] final_source_image_id =", final_source_image_id)
+
                 firebase_record = save_model_to_firebase(
                     file_bytes=glb_bytes,
                     user_id=payload.get("user_id", "anonymous_student"),
@@ -511,6 +531,9 @@ async def _run_tripo3d_job(job_id: str) -> None:
 async def tripo3d_start_job(payload: dict) -> Dict[str, Any]:
     raw, filename, mime, source_url, params = await _prepare_payload_image(payload)
     task_id = await _create_remote_task(raw, filename, mime, params)
+
+    print("[TRIPO3D DEBUG] incoming payload =", payload)
+    print("[TRIPO3D DEBUG] source_url =", source_url)
 
     job_id = uuid.uuid4().hex
     job = {
