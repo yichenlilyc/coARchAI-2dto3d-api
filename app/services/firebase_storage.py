@@ -22,6 +22,8 @@ def save_model_to_firebase(file_bytes: bytes, user_id: str, model_id: str, sourc
     # Make public
     blob.make_public()
     public_url = blob.public_url
+
+    print("[FIREBASE DEBUG] source_image_id arg =", source_image_id)
     
     # Save metadata USING MERGE=TRUE
     doc_data = {
@@ -33,7 +35,7 @@ def save_model_to_firebase(file_bytes: bytes, user_id: str, model_id: str, sourc
         "created_at": datetime.utcnow().isoformat() + "Z",
         "status": "completed",
     }
-    
+    print("[FIREBASE DEBUG] doc_data =", doc_data)
     # merge true adds the PLY link to the existing GLB document
     db.collection("models_3d").document(model_id).set(doc_data, merge=True)
     
