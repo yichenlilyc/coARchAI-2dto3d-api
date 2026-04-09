@@ -100,11 +100,11 @@ def run_3d_generation(task_id: str, img_path: str, mask_path: str):
     try:
         img_rgb = np.array(Image.open(img_path).convert("RGB"))
         mask_raw = np.array(Image.open(mask_path).convert("L"))
-        mask = (mask_raw > 128).astype(np.uint8) * 255
+        mask = mask_raw > 128 # Meta's load image code multiplies by 255 later, do NOT do here, breaks generation
 
         if mask.max() == 0: raise ValueError("Mask is empty. Please provide a valid segmentation mask.")
-        img_rgb, mask = smart_crop(img_rgb, mask)
-        if mask.max() == 0: raise ValueError("After cropping, mask is empty.")
+        # img_rgb, mask = smart_crop(img_rgb, mask) <---- This smart crop breaks the mask alignment, DO NOT USE
+        # if mask.max() == 0: raise ValueError("After cropping, mask is empty.")
 
         print(f"Running 3D generation for task {task_id}...")
         
