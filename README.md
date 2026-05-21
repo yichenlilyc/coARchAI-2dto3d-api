@@ -1,408 +1,331 @@
-# 2Dto3D-Server (TripoSR backend)
+# CoARchAI 2D-to-3D API — RunPod Deployment Guide
 
-Containerized **FastAPI** server that wraps **TripoSR** ,**shap-e**, and **Tripo3D** for single-image → 3D reconstruction.  
-Runs on **GPU (CUDA)** or **CPU**, with optional public access via **Cloudflare Tunnel**.
+Containerized **FastAPI** server powering image-to-3D generation using **Meta SAM 3**, **SAM 3D Objects**, and **Tripo3D**. Designed for deployment on RunPod with a Cloudflare Tunnel for public access.
 
-- ✅ One repo, two targets: `app-gpu` and `app-cpu`  
-- ✅ Reproducible builds with Docker  
-- ✅ Simple health checks & HTTP API  
-- ✅ Optional public URLs (Cloudflare Tunnel)
-- ✅ Tripo3D cloud endpoint (image→model)
-- ✅ Local /upload endpoint for Unity/clients (serves files back at /upload/<file>)
-
-> Tested on Windows 11 + Docker Desktop.  
-> Linux works the same (NVIDIA Container Toolkit required for GPU).
+The stack runs two services in a single container:
+- **Main API** (port 8000, GPU 0) — SAM 3 segmentation, Tripo3D cloud generation, uploads, presets, dictation
+- **SAM 3D Worker** (port 8001, GPU 1) — internal worker that runs the heavy SAM 3D Objects mesh generation pipeline
 
 ---
 
 ## Contents
 
-- [Prerequisites](#prerequisites)
-- [Repo Layout](#repo-layout)
-- [Quick Start (local)](#quick-start-local)
-- [API](#api)
-- [Config & Models](#config--models)
-- [Cloudflare Tunnel (public URLs)](#cloudflare-tunnel-public-urls)
-- [Change GPU Architecture](#change-gpu-architecture)
-- [Troubleshooting](#troubleshooting)
-- [Developing locally (without Docker)](#developing-locally-without-docker)
-- [gitignore (suggested)](#gitignore-suggested)
-- [License & Credits](#license--credits)
-- [Acknowledgements](#acknowledgements)
+- [Hardware Requirements](#hardware-requirements)
+- [Building the Docker Image](#building-the-docker-image)
+- [Hugging Face Token & Gated Models](#hugging-face-token--gated-models)
+- [API Overview](#api-overview)
+- [Cloudflare Tunnel Setup](#cloudflare-tunnel-setup)
+- [RunPod Template Setup](#runpod-template-setup)
+- [Environment Variable Reference](#environment-variable-reference)
+- [GPU Architecture Reference](#gpu-architecture-reference)
 
 ---
 
-## Prerequisites
+## Hardware Requirements
 
-### Everyone
-- **Docker Desktop** (Windows/Mac) or **Docker Engine** (Linux)
+This deployment requires a **dual-GPU RunPod instance**. The launcher explicitly splits work across two GPUs:
 
-### For GPU build
-- NVIDIA GPU + latest driver  
-- On Windows: Docker Desktop → **Use the WSL 2 based engine**  
-- Docker can see your GPU:
-```bash
-docker run --gpus all nvidia/cuda:12.6.2-base-ubuntu24.04 nvidia-smi
-```
+| Process | GPU | Port | Minimum VRAM |
+|---|---|---|---|
+| Main API (SAM 3 segmentation) | GPU 0 | 8000 | 16 GB |
+| SAM 3D Worker (mesh generation) | GPU 1 | 8001 | 16 GB |
 
-### For CPU build
-- No special hardware. It’s slower but works everywhere.
+**Total minimum: 32 GB VRAM across two GPUs.**
 
----
+A single high-VRAM GPU (e.g. A100 80 GB) can be used by adjusting `CUDA_VISIBLE_DEVICES` in `launcher.py`, but the default configuration expects two separate devices.
 
-## Repo layout
-```bash
-.
-├─ external/TripoSR/
-│  ├─ config.yaml           # TripoSR config (required)
-│  └─ model.ckpt            # TripoSR weights (required)
-├─ scripts/
-│  ├─ server.py             # FastAPI app
-│  └─ docker/
-│     ├─ Dockerfile.gpu
-│     └─ Dockerfile.cpu
-├─ requirements.txt         # GPU/standard runtime
-├─ requirements.cpu.txt     # CPU-only runtime
-└─ docker-compose.yml
-```
-> **Important:** Put your config.yaml and model.ckpt in external/TripoSR/.
-> The server reads these by filename via environment variables.
+### Supported GPU Architectures
+
+The Dockerfile pre-compiles CUDA kernels for the following compute capabilities:
+
+| GPU Family | Compute Capability | Example GPUs |
+|---|---|---|
+| Turing | 7.5 | RTX 2080 Ti, T4 |
+| Ampere (data center) | 8.0 | A100, A30 |
+| Ampere (consumer) | 8.6 | RTX 3090, 3080, A6000 |
+| Ada Lovelace | 8.9 | RTX 4090, 4080, L40S |
+| Hopper | 9.0 | H100 |
+
+Recommended RunPod GPU types: **2x A100 (40/80 GB)**, **2x RTX 4090**, or **1x H100 (80 GB SXM)**.
+
+Minimum CUDA version required: **CUDA 12.6+** (the image is built on CUDA 12.8).
 
 ---
 
-## Quick Start (local)
-1) Clone & prepare
-```bash
-git clone https://github.com/yichenlilyc/coARchAI-2dto3d-api.git
-cd coARchAI-2dto3d-api
-cp .env.example .env
-```
-2) Put model files
-Place your weights and config here:
-```bash
-external/TripoSR/model.ckpt
-external/TripoSR/config.yaml
-```
-(These are not committed. See `.gitignore`.)
-3) Cloudflare Tunnel (optional, for public access)
-Create a tunnel and get a token:
-```bash
-# One-time on your machine:
-cloudflared tunnel create 2dto3d
-cloudflared tunnel token 2dto3d
-```
-Copy the token into `.env`:
-```bash
-CF_TUNNEL_TOKEN=PASTE_YOUR_TOKEN_HERE
-```
-Edit `cloudflared/config.yml` and replace hostnames:
-```bash
-ingress:
-  - hostname: api-gpu.YOURDOMAIN.com
-    service: http://app-gpu:8000
-  - hostname: api-cpu.YOURDOMAIN.com
-    service: http://app-cpu:8000
-  - service: http_status:404
-```
-Then create DNS records (in Cloudflare Dashboard or CLI):
-```bash
-# Example via CLI:
-cloudflared tunnel route dns 2dto3d api-gpu.YOURDOMAIN.com
-cloudflared tunnel route dns 2dto3d api-cpu.YOURDOMAIN.com
-```
-4) Tripo3D setup
-Add to `.env`:
-```bash
-TRIPO3D_API_KEY=tsk-...
-TRIPO3D_BASE=https://api.tripo3d.ai/v2/openapi
-TRIPO3D_MODEL_VERSION=v2.0-20240919
-TRIPO3D_POLL_SECONDS=2.0
-TRIPO3D_TIMEOUT_SECONDS=1800
-USE_TRIPO_SDK=1
-```
-5) Run (GPU)
-```bash
-docker compose --profile gpu up --build -d
-# optional public URL:
-docker compose --profile tunnel up -d
-```
-6) Run (CPU)
-```bash
-docker compose --profile cpu up --build -d
-# optional public URL:
-docker compose --profile tunnel up -d
-```
-7) Test locally
-- GPU: http://localhost:8000/health
-- GPU Server listens on http://localhost:8000
-- CPU: http://localhost:8001/health
-- CPU Server listens on http://localhost:8001
+## Building the Docker Image
 
-8) Test via Cloudflare (if enabled)
-- GPU: https://api-gpu.YOURDOMAIN.com/health
-- CPU: https://api-cpu.YOURDOMAIN.com/health
-9) Stop
+The active Dockerfile for RunPod deployment is [`docker/Dockerfile.sam3.runpod`](docker/Dockerfile.sam3.runpod).
+
+### Prerequisites
+
+- Docker with BuildKit enabled
+- A valid Hugging Face token (see [next section](#hugging-face-token--gated-models))
+
+### Build Command
+
+The Hugging Face token must be passed as a build argument. The image downloads model weights during the build so they are baked in and ready at container start.
+
 ```bash
-docker compose down
-# or stop per profile:
-docker compose --profile tunnel down
+docker build \
+  --build-arg HF_TOKEN=hf_your_token_here \
+  -f docker/Dockerfile.sam3.runpod \
+  -t coarchai-2dto3d:latest \
+  .
 ```
+
+### What the Build Does
+
+1. **Base image** — `nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04`
+2. **Installs Miniforge** (conda) and sets up Python 3.12
+3. **Installs PyTorch 2.7.0** with CUDA 12.6 wheels
+4. **Clones and installs SAM 3** from `facebookresearch/sam3`
+5. **Clones SAM 3D Objects** and builds it in a dedicated `sam3d-objects` conda environment with CUDA kernel compilation
+6. **Downloads model weights** from Hugging Face using `scripts/download_models.py` (requires `HF_TOKEN`)
+7. **Installs cloudflared** for the Cloudflare Tunnel
+8. **Copies the application** and sets all runtime environment variables
+
+### Pushing to a Registry (for RunPod)
+
+```bash
+docker tag coarchai-2dto3d:latest your-registry/coarchai-2dto3d:latest
+docker push your-registry/coarchai-2dto3d:latest
+```
+
+RunPod supports Docker Hub and any public/private registry. Use the image URL when creating your pod template.
 
 ---
 
-## API
-### Health
-**GPU**
-```bash
-curl http://localhost:8000/health
-```
-**CPU**
-```bash
-curl http://localhost:8001/health
-```
-**Response (example):**
-```bash
-{
-  "ok": true,
-  "device": "cuda",
-  "cuda_available": true,
-  "triposr_available": true,
-  "triposr_model_dir": "/app/external/TripoSR",
-  "triposr_config": "config.yaml",
-  "triposr_weights": "model.ckpt",
-  "triposr_config_exists": true,
-  "triposr_weights_exists": true
-}
-```
-### POST /upload
-Upload a PNG/JPG/WebP and get a URL you can feed to the reconstruction endpoints.
-The server also serves files back at `/upload/<filename>`.
-- Response:
-```bash
-{
-  "url": "/upload/2f4e0a....png"
-}
-```
-### Image → 3D (local Shap-E)
-**POST /image-to-3d/shap-e**
-- Body (JSON): { "url": "<http-url>" } or { "b64": "<base64>" }
-- Optional query:` guidance_scale`, `steps`,` frame_size`
-- Response: GLB model `(model/gltf-binary)`
-**Example**
-```bash
-curl -X POST "http://localhost:8000/image-to-3d/shap-e?steps=64" \
-  -H "Content-Type: application/json" \
-  -d '{"url":"http://localhost:8000/upload/example.png"}' \
-  -o shap-e.glb
-```
-### Image → 3D (local TripoSR)
-**POST /image-to-3d/triposr**
-- Body (JSON): { "url": "<http-url>" } or { "b64": "<base64>" }
-- Optional query:`mc_resolution`, `has_vertex_color`, `seed`, ...
-- Response: GLB model
-**Example**
-```bash
-curl -X POST http://localhost:8000/image-to-3d/triposr \
-  -H "Content-Type: application/json" \
-  -d '{"url":"http://localhost:8000/upload/example.png", "mc_resolution":256}' \
-  -o triposr.glb
-```
-### Image → 3D (Tripo3D cloud)
-**POST /image-to-3d/tripo3d**
-- Uses your `TRIPO3D_API_KEY`
-- Body (JSON): { "url": "<http-url>" } or { "b64": "<base64>" }
-- Optional `params`: `{ "texture": true, "pbr": true, "smart_low_poly": true, "generate_parts": false, ... }`
-- Response: GLB model
-**Example**
-```bash
-curl -X POST http://localhost:8000/image-to-3d/tripo3d \
-  -H "Content-Type: application/json" \
-  -d '{"url":"http://localhost:8000/upload/example.png","params":{"texture":true,"pbr":true}}' \
-  -o tripo3d.glb
-```
-Notes:
-- The server accepts local /upload/... URLs and internally handles Tripo3D upload → task → download.
-- If your Tripo3D tenant requires specific fields (e.g. model_version), we read them from env; you can also pass them via params.
+## Hugging Face Token & Gated Models
+
+**A Hugging Face account with access to the following gated repositories is required.** Request access on the Hugging Face model pages before building — the build will fail at the download step otherwise.
+
+| Model | Repository | Purpose |
+|---|---|---|
+| SAM 3 | `facebookresearch/sam3` (GitHub, cloned at build) | 2D segmentation via text prompt and touch/click |
+| SAM 2.1 Large | `facebook/sam2.1-hiera-large` | Segmentation weights used by the SAM 3 pipeline |
+| SAM 3D Objects | `facebook/sam-3d-objects` | Full 3D mesh generation from masked images |
+
+All three models are gated (require Meta's approval on Hugging Face). After approval is granted:
+
+1. Go to [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+2. Create a token with **Read** access
+3. Pass it as `--build-arg HF_TOKEN=hf_...` when building the image
+
+The token is only needed at **build time** for the model download step. It does not need to be set as a runtime environment variable on the RunPod pod.
 
 ---
 
-## Config & Models
-Environment variables (already set in docker-compose.yml):
-### TripoSR
-```bash
-TRIPOSR_MODEL_DIR=/app/external/TripoSR
-TRIPOSR_CONFIG=config.yaml
-TRIPOSR_WEIGHTS=model.ckpt
+## API Overview
+
+The API is built with FastAPI and served by Uvicorn on port 8000. All endpoints are accessible at your public tunnel URL or `http://localhost:8000` locally.
+
+Interactive docs are available at `/docs` once the container is running.
+
+### Health Check
+
 ```
-### Tripo3D(cloud)
-```bash
-TRIPO3D_API_KEY=sk-...
-TRIPO3D_BASE=https://api.tripo3d.ai/v2/openapi
-TRIPO3D_MODEL_VERSION=v2.0-20240919
-TRIPO3D_POLL_SECONDS=2.0
-TRIPO3D_TIMEOUT_SECONDS=1800
-USE_TRIPO_SDK=1
+GET /health
 ```
-### Upload /URLs
-```bash
-UPLOAD_DIR=/app/upload                  # local folder for /upload
-PUBLIC_BASE_URL=http://localhost:8000   # optional, return absolute URLs
+
+Returns the status of all loaded models, CUDA availability, and service configuration. Use this to verify the container started correctly.
+
+### SAM 3 Segmentation
+
+**Touch/Click to Mask**
 ```
-The repo volume-mounts the whole project into the container at `/app`, so you can modify files without rebuilding.
+POST /image-to-3d/sam/segment-touch
+```
+Body: `{ "b64": "<base64-image>", "x": <pixel-x>, "y": <pixel-y> }`
+Returns: `{ "mask_b64": "<base64-png-mask>" }`
+
+**Text Prompt to Mask**
+```
+POST /image-to-3d/segment-prompt
+```
+Body: `{ "b64": "<base64-image>", "prompt": "chair" }`
+Returns: `{ "mask_b64": "<base64-png-mask>" }`
+
+### SAM 3D Mesh Generation (Async)
+
+**Submit a generation job**
+```
+POST /image-to-3d/sam/generate
+```
+Body: `{ "b64": "<base64-image>", "mask_b64": "<base64-mask>" }`
+Returns: `{ "job_id": "<uuid>", "status": "queued" }`
+
+The job is handed off to the SAM 3D Worker on GPU 1 and processed asynchronously.
+
+**Poll for status**
+```
+GET /image-to-3d/sam/status/{job_id}?format=glb&user_id=<uid>
+```
+Returns `{ "status": "running" }` while processing, or `{ "status": "succeeded", "model_url": "<firebase-url>" }` when complete. Supported formats: `glb`, `ply`.
+
+### Uploads & Presets
+
+| Endpoint | Description |
+|---|---|
+| `POST /uploads/...` | Upload images for processing |
+| `GET /presets/maps/...` | Serve preset map files |
+| `GET /presets/models/...` | Serve preset 3D models |
+| `GET /static/generated/...` | Serve generated outputs |
+
+### Dictation
+
+```
+POST /dictation/...
+```
+
+Transcribes audio via OpenAI Whisper. Requires `OPENAI_API_KEY` to be set.
 
 ---
 
-## Cloudflare Tunnel (public URLs)
-This is optional. Use it if you want to access your API from the internet without opening router ports.
-1) Create a tunnel & get a token
-- Cloudflare dashboard → Zero Trust → Networks → Tunnels → Create tunnel
-- Choose Cloudflared
-- Copy the tunnel token (long string, may end with =)
-2) Add the token to Docker Compose
-Copy the token into `.env`:
-```bash
-CF_TUNNEL_TOKEN=PASTE_YOUR_TOKEN_HERE
-```
-Edit `cloudflared/config.yml` and replace hostnames:
-```bash
-ingress:
-  - hostname: api-gpu.YOURDOMAIN.com
-    service: http://app-gpu:8000
-  - hostname: api-cpu.YOURDOMAIN.com
-    service: http://app-cpu:8000
-  - service: http_status:404
-```
-Start it:
-```bash
-docker compose up -d cloudflared
-```
-3) Map public hostnames → local services
-Cloudflare Zero Trust → Networks → Tunnels → your tunnel → Published application routes (or Hostname routes, depending on UI):
-Create two routes:
-- api-gpu.yourdomain.com → Type HTTP, URL http://app-gpu:8000
-- api-cpu.yourdomain.com → Type HTTP, URL http://app-cpu:8000
-Make sure the tunnel status is HEALTHY.
-Now test:
-```bash
-curl https://api-gpu.yourdomain.com/health
-curl https://api-cpu.yourdomain.com/health
-```
-If you see 5xx at first: check that the containers are running and that the service URLs are exactly http://app-gpu:8000 and http://app-cpu:8000 (these are Docker service names on the compose network).
+## Cloudflare Tunnel Setup
 
----
+The container includes `cloudflared` and will automatically start a tunnel at launch if `CF_TUNNEL_TOKEN` is set in the pod's environment.
 
-## Change GPU Architecture
-We pass architecture to NVCC at build time so CUDA kernels are compiled for your GPU.
-Edit the GPU build args in `docker-compose.yml`:
-```bash
-build:
-  context: .
-  dockerfile: scripts/docker/Dockerfile.gpu
-  args:
-    CUDA_ARCH_LIST: "120"     # default for RTX 50xx (Blackwell, sm_120)
-    TORCH_CUDA_ARCH_DOT: "12.0"
+### Creating a Tunnel
+
+1. Go to [Cloudflare Zero Trust Dashboard](https://one.dash.cloudflare.com/) → **Networks** → **Tunnels**
+2. Click **Create a tunnel** → choose **Cloudflared**
+3. Name the tunnel (e.g. `coarchai-api`) and save
+4. Copy the tunnel token — a long string starting with `eyJ...`
+5. Under the tunnel's **Public Hostname** tab, add a route:
+   - **Subdomain**: your chosen subdomain (e.g. `api`)
+   - **Domain**: your Cloudflare-managed domain
+   - **Service**: `HTTP` → `localhost:8000`
+
+### Connecting the Tunnel at Runtime
+
+Set `CF_TUNNEL_TOKEN` as a RunPod environment variable (see [RunPod Template Setup](#runpod-template-setup)). The `launcher.py` startup script detects the token and starts the tunnel automatically:
+
+```python
+# From launcher.py
+cf_token = os.environ.get("CF_TUNNEL_TOKEN")
+if cf_token:
+    cf_process = subprocess.Popen([
+        "cloudflared", "tunnel", "--protocol", "http2",
+        "--no-autoupdate", "run", "--token", cf_token
+    ])
 ```
-**Common values**
 
-| GPU family         | Compute Capability | `CUDA_ARCH_LIST` | Notes                         |
-|--------------------|--------------------|------------------|-------------------------------|
-| GTX 10xx (Pascal)  | 6.1                | 61               | Old; ensure Torch supports    |
-| RTX 20xx (Turing)  | 7.5                | 75               |                               |
-| RTX 30xx (Ampere)  | 8.6                | 86               | e.g. 3080/3090               |
-| RTX 40xx (Ada)     | 8.9                | 89               | e.g. 4080/4090               |
-| RTX 50xx (Blackwell)| 12.0              | 120              | e.g. 5090                    |
+Also set `PUBLIC_BASE_URL` to your tunnel's public hostname so the API generates correct absolute URLs in responses and the `/docs` interface uses the right server:
 
-If you change these, rebuild: 
+```
+PUBLIC_BASE_URL=https://api.yourdomain.com
+```
+
+### Verifying the Tunnel
+
+After the pod starts, check the health endpoint through the tunnel:
+
 ```bash
-docker compose build app-gpu.
+curl https://api.yourdomain.com/health
 ```
 
 ---
 
-## Troubleshooting
-### GPU container won’t see the GPU
-- Docker Desktop → Settings → Resources → enable GPU
-- Verify: 
-```bash
-docker run --gpus all nvidia/cuda:12.6.2-base-ubuntu24.04 nvidia-smi
-```
-- Rebuild: 
-```bash
-docker compose build app-gpu
-```
-### `torchmcubes` fails to build
-- We already pin scikit-build-core, cmake, ninja, and pybind11 in the Dockerfiles. 
-  If you add packages, keep those pins or you may hit CMake errors.
-- For CPU image, we also install a CPU wheel of torch; mixing CUDA torch into the CPU image will re-introduce CUDA checks.
-### Health OK locally but not via Cloudflare
-- In the tunnel’s routes, use the Docker service name and port: http://app-gpu:8000, http://app-cpu:8000.
-- Check logs: 
-```bash
-docker compose logs -f cloudflared
-```
-- Identity/Access: ensure you didn’t enable login/policies while testing.
-### Change ports
-- GPU is published to host port `8000`, CPU to `8001`.
-  Adjust ports: in `docker-compose.yml` if needed.
+## RunPod Template Setup
+
+### Creating a Custom Template
+
+1. In RunPod, go to **My Templates** → **New Template**
+2. Set **Container Image** to your pushed image (e.g. `docker.io/youruser/coarchai-2dto3d:latest`)
+3. Set **Container Disk** to at least **50 GB** (model weights alone are ~20 GB)
+4. Set **Expose HTTP Ports** to `8000`
+5. Add all required environment variables in the **Environment Variables** section (see below)
+
+### Selecting the Right Pod
+
+When deploying from the template, filter pods by:
+- **GPU VRAM**: 32 GB minimum total (ideally 2x 16 GB+ or a single large GPU)
+- **GPU Count**: 2 (the launcher assigns GPU 0 to the API and GPU 1 to the worker by default)
+- **CUDA Version**: 12.6 or higher
+
+Recommended instance types: `2x A100 SXM (40 GB)`, `2x RTX 4090`, `1x H100 (80 GB SXM)`.
 
 ---
 
-## Developing locally (without Docker)
-Requires Python 3.11+ and a working CUDA toolchain for GPU.
-```bash
-# venv
-python -m venv .venv
-. .venv/Scripts/activate  # Windows PowerShell: .\.venv\Scripts\Activate.ps1
-pip install -U pip
-# Pick one:
-pip install -r requirements.txt        # GPU / standard
-# or
-pip install -r requirements.cpu.txt    # CPU-only
-# Run
-uvicorn scripts.server:app --host 0.0.0.0 --port 8000
-```
+## Environment Variable Reference
+
+Set these in the RunPod template's **Environment Variables** section. Variables marked **Required** will cause the service to fail or degrade without them.
+
+### Tunnel & Public Access
+
+| Variable | Required | Description |
+|---|---|---|
+| `CF_TUNNEL_TOKEN` | Required | Cloudflare Tunnel token from the Zero Trust dashboard. Without this, the container runs with no public URL. |
+| `PUBLIC_BASE_URL` | Recommended | Full public URL (e.g. `https://api.yourdomain.com`). Used to generate absolute URLs in API responses and configure the FastAPI `/docs` server list. |
+
+### AI Services
+
+| Variable | Required | Description |
+|---|---|---|
+| `TRIPO3D_API_KEY` | For Tripo3D | API key from [tripo3d.ai](https://www.tripo3d.ai). Required to use the Tripo3D cloud generation endpoint. |
+| `OPENAI_API_KEY` | For Dictation | OpenAI API key. Required to use the audio transcription endpoint. |
+
+### Firebase (for model storage & retrieval)
+
+| Variable | Required | Description |
+|---|---|---|
+| `FIREBASE_DB_URL` | For Firebase | Firebase Realtime Database URL (e.g. `https://your-project.firebaseio.com`). |
+| `FIREBASE_DB_AUTH` | For Firebase | Firebase authentication secret or service account token. |
+
+### Runtime Paths (pre-configured defaults)
+
+These are already set in the Dockerfile and do not need to be overridden in the RunPod template under normal circumstances.
+
+| Variable | Default | Description |
+|---|---|---|
+| `USE_CUDA` | `1` | Enable CUDA inference. |
+| `SAM_WORKER_URL` | `http://127.0.0.1:8001/process-3d` | Internal URL the Main API uses to reach the SAM 3D Worker. |
+| `GENERATED_IMAGES_DIR` | `/app/generated/images` | Output directory for generated images. |
+| `GENERATED_MODELS_DIR` | `/app/generated/models` | Output directory for generated 3D models. |
+| `SAM_TASKS_DIR` | `/app/tasks` | Ticket directory for async job tracking. |
+| `SAM_TEMP_DIR` | `/app/temp` | Temporary files during 3D generation. |
+| `TRIPO3D_BASE` | `https://api.tripo3d.ai/v2/openapi` | Tripo3D API base URL. |
+| `TRIPO3D_MODEL_VERSION` | `v2.0-20240919` | Tripo3D model version string. |
+| `TRIPO3D_POLL_SECONDS` | `2.0` | Polling interval for Tripo3D job status. |
+| `TRIPO3D_TIMEOUT_SECONDS` | `1800` | Max wait time for a Tripo3D job (30 min). |
 
 ---
 
-## .gitignore (suggested)
-```bsh
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.egg-info/
-.venv*/
-.env
+## GPU Architecture Reference
 
-# Editors / OS
-.vscode/
-.idea/
-.DS_Store
+The Dockerfile compiles CUDA kernels for the following architectures at build time. If you are building for a GPU not in this list, add its compute capability to the `CUDA_ARCH_LIST` and `TORCH_CUDA_ARCH_DOT` build args before building.
 
-# Models and large artifacts
-external/TripoSR/*.ckpt
-external/TripoSR/checkpoints/
-external/TripoSR/outputs/
-
-# Docker
-*.log
+```dockerfile
+ARG CUDA_ARCH_LIST="90;89;86;80;75"
+ARG TORCH_CUDA_ARCH_DOT="9.0;8.9;8.6;8.0;7.5"
 ```
+
+To target a different architecture, pass it at build time:
+
+```bash
+docker build \
+  --build-arg HF_TOKEN=hf_... \
+  --build-arg CUDA_ARCH_LIST="86" \
+  --build-arg TORCH_CUDA_ARCH_DOT="8.6" \
+  -f docker/Dockerfile.sam3.runpod \
+  -t coarchai-2dto3d:latest \
+  .
+```
+
+| Compute Capability | GPU Family | Example Models |
+|---|---|---|
+| 7.5 | Turing | RTX 2080 Ti, T4 |
+| 8.0 | Ampere (data center) | A100, A30 |
+| 8.6 | Ampere (consumer) | RTX 3090, 3080, A6000 |
+| 8.9 | Ada Lovelace | RTX 4090, 4080, L40S |
+| 9.0 | Hopper | H100 |
 
 ---
 
 ## License & Credits
-This repo glues together FastAPI + TripoSR + shap-e for containerized serving.
-- TripoSR is © its original authors; please follow their license/usage terms for the model and code.
-- shap-e is © its original authors; please follow their license/usage terms for the model and code.
-- Tripo3D is © its original authors; please follow their license/usage terms for the model and code.
-- CUDA®, NVIDIA®, and product names are trademarks of their respective owners.
 
----
-
-## Acknowledgements
-Thanks to the open-source community for:
-- FastAPI / Uvicorn
-- PyTorch / diffusers / transformers
-- scikit-build-core, CMake, ninja, pybind11
-- Cloudflare Tunnel
+- [Meta SAM 3](https://github.com/facebookresearch/sam3) — Meta AI Research License
+- [Meta SAM 3D Objects](https://github.com/facebookresearch/sam-3d-objects) — Meta AI Research License
+- [SAM 2.1](https://huggingface.co/facebook/sam2.1-hiera-large) — Meta AI Research License
+- [Tripo3D](https://www.tripo3d.ai) — cloud API, subject to Tripo3D terms of service
+- FastAPI / Uvicorn / PyTorch / HuggingFace Transformers / Cloudflare Tunnel
