@@ -16,6 +16,8 @@ The stack runs two services in a single container:
 - [API Overview](#api-overview)
 - [Cloudflare Tunnel Setup](#cloudflare-tunnel-setup)
 - [RunPod Template Setup](#runpod-template-setup)
+- [Firebase Project Setup](#firebase-project-setup)
+- [Firebase Storage & Metadata Indexing](#firebase-storage--metadata-indexing)
 - [Environment Variable Reference](#environment-variable-reference)
 - [GPU Architecture Reference](#gpu-architecture-reference)
 
@@ -247,6 +249,192 @@ Recommended instance types: `2x A100 SXM (40 GB)`, `2x RTX 4090`, `1x H100 (80 G
 
 ---
 
+## Firebase Project Setup
+
+This section covers creating the Firebase project, enabling the required services, and generating the credentials the API expects.
+
+### 1. Create a Firebase Project
+
+1. Go to [console.firebase.google.com](https://console.firebase.google.com) and click **Add project**
+2. Give it a name (e.g. `coarchai`), disable Google Analytics if not needed, and click **Create project**
+
+### 2. Enable Cloud Firestore
+
+1. In the left sidebar, go to **Build** → **Firestore Database**
+2. Click **Create database**
+3. Choose **Production mode** (you will set rules in a moment)
+4. Select a region close to your RunPod datacenter and click **Enable**
+
+Once created, set the following security rules under **Firestore Database** → **Rules** to allow the server-side service account full access while keeping unauthenticated clients read-only:
+
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /models_3d/{modelId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+  }
+}
+```
+
+The API writes to Firestore using the Admin SDK (bypasses rules entirely), so these rules only affect client-side access from your mobile/web app.
+
+**Firestore Index**
+
+If your client app queries models by user — e.g. `where("user_id", "==", uid).orderBy("created_at", "desc")` — you will need a composite index. Create it in **Firestore Database** → **Indexes** → **Composite** → **Add index**:
+
+| Collection | Field | Order |
+|---|---|---|
+| `models_3d` | `user_id` | Ascending |
+| `models_3d` | `created_at` | Descending |
+
+Firestore will also prompt you to create missing indexes automatically the first time a query fails — follow the link in the error message.
+
+### 3. Enable Firebase Storage
+
+1. In the left sidebar, go to **Build** → **Storage**
+2. Click **Get started**, choose **Production mode**, select a region, and click **Done**
+
+The API calls `blob.make_public()` after each upload, which grants public read access to each file individually. For this to work, the Storage bucket's IAM must allow the `allUsers` principal to have the **Storage Object Viewer** role. Firebase does not set this by default.
+
+To enable it:
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com) → **Cloud Storage** → **Buckets**
+2. Click your bucket (it will be named something like `your-project.firebasestorage.app`)
+3. Go to the **Permissions** tab → **Grant access**
+4. New principals: `allUsers`
+5. Role: `Storage Object Viewer`
+6. Click **Save** (dismiss the public access warning)
+
+Alternatively, set the Storage rules to allow public reads in the Firebase console under **Storage** → **Rules**:
+
+```
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /models/{userId}/{modelId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+  }
+}
+```
+
+### 4. Create a Service Account
+
+The API authenticates with Firebase using a service account, not a user login. The service account credentials are what you encode into `FIREBASE_SERVICE_ACCOUNT_B64`.
+
+1. In the Firebase console, go to **Project Settings** (gear icon) → **Service accounts**
+2. Click **Generate new private key** → **Generate key**
+3. A `.json` file will download — keep it secure and do not commit it to git
+
+The downloaded JSON looks like:
+
+```json
+{
+  "type": "service_account",
+  "project_id": "your-project-id",
+  "private_key_id": "...",
+  "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...",
+  "client_email": "firebase-adminsdk-...@your-project.iam.gserviceaccount.com",
+  ...
+}
+```
+
+### 5. Encode the Credentials for RunPod
+
+Base64-encode the JSON file into a single-line string:
+
+```bash
+base64 -i your-service-account.json | tr -d '\n'
+```
+
+Copy the output. This is the value you paste into `FIREBASE_SERVICE_ACCOUNT_B64` in your RunPod template environment variables. The API decodes it at startup:
+
+```python
+cert_dict = json.loads(base64.b64decode(firebase_b64).decode('utf-8'))
+cred = credentials.Certificate(cert_dict)
+initialize_app(cred, {'storageBucket': 'your-project.firebasestorage.app'})
+```
+
+### 6. Update the Bucket Name in `database.py`
+
+The storage bucket name is set directly in [`app/database.py`](app/database.py). Update it to match your Firebase project's bucket:
+
+```python
+initialize_app(cred, {
+    'storageBucket': 'your-project-id.firebasestorage.app'
+})
+```
+
+The bucket name follows the pattern `<project-id>.firebasestorage.app` and is visible in the Firebase console under **Storage** → **Files** in the top bar.
+
+---
+
+## Firebase Storage & Metadata Indexing
+
+The API uses two Firebase products for model persistence:
+
+- **Firebase Storage** — stores the generated `.glb` and `.ply` mesh files at a public URL
+- **Cloud Firestore** — indexes metadata for every generated model so clients can query by user or model ID
+
+### Authentication
+
+Firebase is initialized using a **service account JSON** encoded as a base64 string. This avoids having to mount a credentials file into the container and lets you paste it directly as a RunPod environment variable.
+
+To generate the value from your service account file:
+
+```bash
+base64 -i your-firebase-service-account.json | tr -d '\n'
+```
+
+Paste the output as the value of `FIREBASE_SERVICE_ACCOUNT_B64` in your RunPod template. Without this variable, Firebase will not initialize and all calls to `save_model_to_firebase` will raise an exception.
+
+### Storage Layout
+
+Generated mesh files are uploaded to Firebase Storage under the path:
+
+```
+models/{user_id}/{model_id}.{format}
+```
+
+Where:
+- `user_id` is passed by the client when polling the status endpoint (`?user_id=...`)
+- `model_id` is the task UUID assigned at generation time
+- `format` is `glb` or `ply`
+
+Both formats are uploaded and made public independently. The public URL returned by Storage is then written into Firestore.
+
+### Firestore Metadata Document
+
+After each upload, a document is written to the `models_3d` Firestore collection using `model_id` as the document ID. The write uses `merge=True`, so calling the status endpoint for both `glb` and `ply` formats merges both URLs into the same document without overwriting:
+
+```json
+{
+  "model_id": "<task-uuid>",
+  "user_id": "<user-id>",
+  "source_image_id": "<original-image-url-or-id>",
+  "preview_url": "<optional-preview-image-url>",
+  "glb_url": "https://storage.googleapis.com/...",
+  "ply_url": "https://storage.googleapis.com/...",
+  "created_at": "2024-01-15T10:30:00.000Z",
+  "status": "completed"
+}
+```
+
+This document structure allows clients to:
+- Look up a model by `model_id` directly
+- Query all models for a `user_id` via a Firestore `where` filter
+- Retrieve both mesh formats from a single document
+
+### Legacy Realtime Database
+
+The `FIREBASE_DB_URL` and `FIREBASE_DB_AUTH` variables are used by the legacy router for reading data from Firebase Realtime Database via the REST API. This is separate from the Firestore + Storage pipeline above and is only needed if the legacy image endpoints are in use.
+
+---
+
 ## Environment Variable Reference
 
 Set these in the RunPod template's **Environment Variables** section. Variables marked **Required** will cause the service to fail or degrade without them.
@@ -269,8 +457,9 @@ Set these in the RunPod template's **Environment Variables** section. Variables 
 
 | Variable | Required | Description |
 |---|---|---|
-| `FIREBASE_DB_URL` | For Firebase | Firebase Realtime Database URL (e.g. `https://your-project.firebaseio.com`). |
-| `FIREBASE_DB_AUTH` | For Firebase | Firebase authentication secret or service account token. |
+| `FIREBASE_SERVICE_ACCOUNT_B64` | Required for Firebase | Base64-encoded Firebase service account JSON. Initializes both Firestore and Firebase Storage. Generate with `base64 -i service-account.json \| tr -d '\n'`. |
+| `FIREBASE_DB_URL` | For legacy endpoints | Firebase Realtime Database URL (e.g. `https://your-project.firebaseio.com`). Only needed for the legacy image router. |
+| `FIREBASE_DB_AUTH` | For legacy endpoints | Firebase RTDB authentication secret. Only needed alongside `FIREBASE_DB_URL`. |
 
 ### Runtime Paths (pre-configured defaults)
 
