@@ -1,3 +1,9 @@
+# Loads the latest SAM 3 codebase and sets up the environment for 
+# GPU-accelerated processing using CUDA 12.8 and PyTorch 2.7.0 cu128. 
+# This Dockerfile is optimized for deployment on Runpod, ensuring that 
+# all necessary dependencies are installed and configured correctly 
+# for both the main API and the SAM 3D Worker.
+
 # ---- GPU build (CUDA 12.8 + PyTorch 2.8.0 cu128) ----
 FROM nvidia/cuda:12.8.0-cudnn-devel-ubuntu22.04
 
